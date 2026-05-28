@@ -1,0 +1,13 @@
+name,email,skills,institution,experience
+Rahul Sharma,rahul@email.com,"ML,Python",IIT Delhi,3
+Priya Singh,priya@email.com,"Frontend,React",BITS Pilani,2
+Ankit Verma,ankit@email.com,"Backend,Node.js",NIT Trichy,4
+Sneha Patel,sneha@email.com,"ML,TensorFlow",IIT Bombay,2
+Karan Mehta,karan@email.com,"Frontend,Vue",BITS Goa,1
+Arjun Nair,arjun@email.com,"Backend,Python",NIT Calicut,3
+Divya Rao,divya@email.com,"ML,PyTorch",IIT Madras,4
+Rohan Gupta,rohan@email.com,"Frontend,React",BITS Hyderabad,2
+Meera Joshi,meera@email.com,"Backend,Java",NIT Surathkal,3
+Vikram Das,vikram@email.com,"ML,Scikit",IIT Kharagpur,2
+Aisha Khan,aisha@email.com,"Frontend,Angular",BITS Pilani,3
+Siddharth Roy,siddharth@email.com,"Backend,Go",NIT Warangal,4
