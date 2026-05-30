@@ -27,7 +27,7 @@ def call_llm(system_prompt: str, user_message: str, max_tokens: int = 1000) -> s
     """
     
     response = client.chat.completions.create(
-        model="llama-3.1-8b-instant",   # llama3 8B model, free on Groq, good quality
+        model="llama-3.3-70b-versatile",   # llama3 8B model, free on Groq, good quality
         max_tokens=max_tokens,
         messages=[
             {"role": "system", "content": system_prompt},

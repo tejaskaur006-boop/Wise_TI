@@ -201,81 +201,73 @@ def list_participants(event_id: int, db: Session = Depends(get_db)):
 
 @app.post("/api/events/{event_id}/teams/form")
 def form_teams_endpoint(event_id: int, db: Session = Depends(get_db)):
-    """
-    Forms teams using algorithm, then generates LLM rationale for each team.
-    Teams are saved with PENDING_APPROVAL status — nothing sent to participants yet.
-    
-    FRONTEND: Called when committee clicks "Form Teams" button
-    LLM USED: YES — generate_team_rationale() called for each team
-    DB: Writes to teams table, updates participant.team_id
-    
-    APPROVAL GATE: Teams saved as PENDING_APPROVAL
-                   Committee must call /api/teams/{id}/approve before emails go out
-    """
-    event = db.query(Event).filter(Event.id == event_id).first()
-    if not event:
-        raise HTTPException(status_code=404, detail="Event not found")
-    
-    # Get participants not yet in a team
-    participants = db.query(Participant).filter(
-        Participant.event_id == event_id,
-        Participant.team_id == None
-    ).all()
-    
-    if not participants:
-        raise HTTPException(status_code=400, detail="No unassigned participants found")
-    
-    # STEP 1: Algorithm groups participants (no LLM)
-    rules = {
-        "team_size": event.team_size,
-        "skill_balance": event.skill_balance,
-        "no_same_institution": event.no_same_institution
-    }
-    formed_teams = form_teams(participants, event.team_size, event.no_same_institution)
-    
-    saved_teams = []
-    
-    for team_data in formed_teams:
-        # Save team to DB first
-        team = Team(
-            event_id=event_id,
-            name=team_data["name"],
-            status="PENDING_APPROVAL"
-        )
-        db.add(team)
-        db.commit()
-        db.refresh(team)
+    import traceback  # LINE 1 ADDED
+    try:              # LINE 2 ADDED — everything below is just indented one level
+
+        event = db.query(Event).filter(Event.id == event_id).first()
+        if not event:
+            raise HTTPException(status_code=404, detail="Event not found")
         
-        # Assign participants to this team
-        members = team_data["members"]
-        for member in members:
-            participant = db.query(Participant).filter(Participant.id == member.id).first()
-            participant.team_id = team.id
-        db.commit()
+        participants = db.query(Participant).filter(
+            Participant.event_id == event_id,
+            Participant.team_id == None
+        ).all()
         
-        # STEP 2: LLM generates rationale for this team
-        rationale = generate_team_rationale(
-            team_name=team_data["name"],
-            members=members,
-            rules=rules
-        )
+        if not participants:
+            raise HTTPException(status_code=400, detail="No unassigned participants found")
         
-        # Save rationale
-        team.rationale = rationale
-        db.commit()
+        rules = {
+            "team_size": event.team_size,
+            "skill_balance": event.skill_balance,
+            "no_same_institution": event.no_same_institution
+        }
+        formed_teams = form_teams(participants, event.team_size, event.no_same_institution)
         
-        saved_teams.append({
-            "team_id": team.id,
-            "team_name": team.name,
-            "rationale": rationale,
-            "status": "PENDING_APPROVAL",
-            "members": [{"name": m.name, "skills": m.skills} for m in members]
-        })
-    
-    return {
-        "message": f"{len(saved_teams)} teams formed, awaiting committee approval",
-        "teams": saved_teams
-    }
+        saved_teams = []
+        
+        for team_data in formed_teams:
+            team = Team(
+                event_id=event_id,
+                name=team_data["name"],
+                status="PENDING_APPROVAL"
+            )
+            db.add(team)
+            db.commit()
+            db.refresh(team)
+            
+            members = team_data["members"]
+            for member in members:
+                participant = db.query(Participant).filter(Participant.id == member.id).first()
+                participant.team_id = team.id
+            db.commit()
+            
+            rationale = generate_team_rationale(
+                team_name=team_data["name"],
+                members=members,
+                rules=rules
+            )
+            
+            team.rationale = rationale
+            db.commit()
+            
+            saved_teams.append({
+                "team_id": team.id,
+                "team_name": team.name,
+                "rationale": rationale,
+                "status": "PENDING_APPROVAL",
+                "members": [{"name": m.name, "skills": m.skills} for m in members]
+            })
+        
+        return {
+            "message": f"{len(saved_teams)} teams formed, awaiting committee approval",
+            "teams": saved_teams
+        }
+
+    except HTTPException:
+        raise  # let FastAPI handle 404/400 normally
+    except Exception as e:
+        traceback.print_exc()  # LINE 3 ADDED — prints exact error in terminal
+        raise HTTPException(status_code=500, detail=str(e))
 
 
 @app.get("/api/events/{event_id}/teams")
