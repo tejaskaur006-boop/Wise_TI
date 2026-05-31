@@ -8,7 +8,6 @@ from llm_service import call_llm
 # This extracts it safely.
 # ─────────────────────────────────────────────
 
-
 def safe_parse_json(text: str) -> dict:
     """
     Tries to extract JSON from LLM response even if model adds extra text.
