@@ -5,7 +5,7 @@ import os
 # Ollama runs locally on your machine at this address
 # No API key needed — completely free and offline
 OLLAMA_URL = "http://localhost:11434/api/generate"
-MODEL_NAME = "qwen3:8b"
+MODEL_NAME = "qwen3:0.6b"
 
 def call_llm(system_prompt: str, user_message: str, max_tokens: int = 1000) -> str:
     """
@@ -41,7 +41,7 @@ def call_llm(system_prompt: str, user_message: str, max_tokens: int = 1000) -> s
         response = requests.post(
             OLLAMA_URL,
             json=payload,
-            timeout=120   # wait up to 2 minutes for response
+            timeout=300   # wait up to 2 minutes for response
         )
         
         if response.status_code != 200:
