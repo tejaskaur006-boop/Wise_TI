@@ -8,20 +8,24 @@ from llm_service import call_llm
 # This extracts it safely.
 # ─────────────────────────────────────────────
 
+
 def safe_parse_json(text: str) -> dict:
     """
-    Tries to extract JSON from LLM response even if it adds extra words.
-    Falls back to a default if parsing completely fails.
-    
-    CALLED BY: every email function below before returning
+    Tries to extract JSON from LLM response even if model adds extra text.
+    Qwen3 sometimes adds <think> tags or extra explanation — this handles that.
     """
+    import re
+    
+    # Remove <think>...</think> blocks that Qwen3 sometimes adds
+    text = re.sub(r'<think>.*?</think>', '', text, flags=re.DOTALL).strip()
+    
     # Try direct parse first
     try:
         return json.loads(text)
     except:
         pass
     
-    # Try to find a JSON block inside the text
+    # Try to find JSON block inside the text
     match = re.search(r'\{.*\}', text, re.DOTALL)
     if match:
         try:
@@ -29,13 +33,11 @@ def safe_parse_json(text: str) -> dict:
         except:
             pass
     
-    # Complete fallback — use the raw text as the email body
+    # Complete fallback — use raw text as email body
     return {
         "subject": "Event Update",
         "body": text.strip()
     }
-
-
 # ─────────────────────────────────────────────
 # EMAIL 1: Team Assignment Welcome
 # Sent to each participant after team approval

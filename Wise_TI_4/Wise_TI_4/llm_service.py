@@ -1,38 +1,62 @@
+import requests
+import json
 import os
-from groq import Groq
-from dotenv import load_dotenv
 
-load_dotenv()
-
-# This creates one Groq client that the whole project uses
-# It reads your API key from the .env file
-client = Groq(api_key=os.getenv("GROQ_API_KEY"))
+# Ollama runs locally on your machine at this address
+# No API key needed — completely free and offline
+OLLAMA_URL = "http://localhost:11434/api/generate"
+MODEL_NAME = "qwen3:8b"
 
 def call_llm(system_prompt: str, user_message: str, max_tokens: int = 1000) -> str:
     """
-    THE ONLY FUNCTION THAT TALKS TO GROQ.
+    THE ONLY FUNCTION THAT TALKS TO OLLAMA.
     Every feature in the project calls this function.
     
-    system_prompt = instructions telling the LLM what role to play
-    user_message  = the actual request with all the data
-    max_tokens    = how long the response can be (1000 is fine for most cases)
-    
-    Returns: plain string response from the LLM
+    Now uses Qwen3 8B running locally via Ollama instead of Groq.
+    No internet needed, no API key needed, completely free.
     
     CONNECTED TO:
-    - features/team_formation.py  (calls this for team rationale)
-    - features/email_drafting.py  (calls this for all emails)
-    - features/evaluation.py      (calls this for guides + anomaly explanation)
-    - features/rag.py             (calls this for committee Q&A)
+    - features/team_formation.py  (team rationale)
+    - features/email_drafting.py  (all emails)
+    - features/evaluation.py      (guides + anomaly explanation)
+    - features/rag.py             (committee Q&A chatbot)
     """
     
-    response = client.chat.completions.create(
-        model="llama-3.3-70b-versatile",   # llama3 8B model, free on Groq, good quality
-        max_tokens=max_tokens,
-        messages=[
-            {"role": "system", "content": system_prompt},
-            {"role": "user",   "content": user_message}
-        ]
-    )
+    # Combine system prompt and user message
+    # Ollama uses a single prompt field
+    full_prompt = f"<|im_start|>system\n{system_prompt}<|im_end|>\n<|im_start|>user\n{user_message}<|im_end|>\n<|im_start|>assistant\n"
     
-    return response.choices[0].message.content
+    payload = {
+        "model": MODEL_NAME,
+        "prompt": full_prompt,
+        "stream": False,          # get full response at once, not word by word
+        "options": {
+            "num_predict": max_tokens,   # max length of response
+            "temperature": 0.7,          # 0 = consistent, 1 = creative
+            "top_p": 0.9
+        }
+    }
+    
+    try:
+        response = requests.post(
+            OLLAMA_URL,
+            json=payload,
+            timeout=120   # wait up to 2 minutes for response
+        )
+        
+        if response.status_code != 200:
+            raise Exception(f"Ollama returned status {response.status_code}: {response.text}")
+        
+        result = response.json()
+        return result["response"].strip()
+    
+    except requests.exceptions.ConnectionError:
+        raise Exception(
+            "Cannot connect to Ollama. Make sure Ollama is running — "
+            "open a terminal and run: ollama serve"
+        )
+    except requests.exceptions.Timeout:
+        raise Exception(
+            "Ollama took too long to respond. "
+            "This can happen if your RAM is full. Close other apps and try again."
+        )
