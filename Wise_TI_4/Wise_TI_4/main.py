@@ -4,6 +4,7 @@ from sqlalchemy.orm import Session
 from pydantic import BaseModel
 from typing import List, Optional
 import pandas as pd
+from features.event_config_parser import process_event_description
 
 # Import database
 from database import (
@@ -43,6 +44,19 @@ create_tables()
 # REQUEST BODY MODELS
 # These define what JSON the frontend sends to each endpoint
 # ─────────────────────────────────────────────
+
+class ConfigureEventRequest(BaseModel):
+    description: str
+    event_id: int
+
+class ClarifyConfigRequest(BaseModel):
+    event_id: int
+    original_description: str
+    answers: str
+
+class ConfirmConfigRequest(BaseModel):
+    event_id: int
+    confirmed: bool
 
 class CreateEventRequest(BaseModel):
     name: str
@@ -798,3 +812,225 @@ if __name__ == "__main__":
     # Run with: python main.py
     # Or:       uvicorn main:app --reload
     uvicorn.run("main:app", host="0.0.0.0", port=8000, reload=True)
+
+
+
+@app.post("/api/events/configure")
+def configure_event_from_description(
+    request: ConfigureEventRequest,
+    db: Session = Depends(get_db)
+):
+    """
+    Takes a free-text event description from the committee
+    and runs the full LLM pipeline:
+    1. Parse description into structured JSON
+    2. Find missing information (gaps)
+    3. Check for contradictions
+    4. If clean, generate summary for committee to confirm
+
+    FRONTEND: Called when committee submits their free-text
+              event description in the configuration chat box
+    LLM USED: YES — process_event_description() runs 3-4 LLM calls
+    DB: Does NOT save yet — waits for committee confirmation
+
+    Returns one of three statuses:
+    - INCOMPLETE  → gaps found, returns questions for committee
+    - CONTRADICTIONS → problems found, returns list of issues
+    - READY → all good, returns summary for committee to confirm
+    """
+    import traceback
+    try:
+        # Verify event exists
+        event = db.query(Event).filter(Event.id == request.event_id).first()
+        if not event:
+            raise HTTPException(status_code=404, detail="Event not found")
+
+        # Run the full LLM pipeline
+        # This makes 3-4 LLM calls — takes 1-3 minutes with Ollama
+        result = process_event_description(request.description)
+
+        # Store the parsed config temporarily even if not confirmed yet
+        # So we can update it when committee answers gap questions
+        if result["config"]:
+            import json
+            event.dynamic_config = json.dumps(result["config"])
+            db.commit()
+
+        return {
+            "event_id": request.event_id,
+            "status": result["status"],
+            "config": result["config"],
+            "questions": result["questions"],         # empty if READY
+            "contradictions": result["contradictions"], # empty if READY
+            "summary": result["summary"]              # only set if READY
+        }
+
+    except HTTPException:
+        raise
+    except Exception as e:
+        traceback.print_exc()
+        raise HTTPException(status_code=500, detail=str(e))
+
+
+@app.post("/api/events/configure/clarify")
+def clarify_event_config(
+    request: ClarifyConfigRequest,
+    db: Session = Depends(get_db)
+):
+    """
+    Called when committee answers the gap questions.
+    Combines original description + answers and re-runs the pipeline.
+
+    FRONTEND: Called when committee submits answers to gap questions
+              shown after the first /configure call returned INCOMPLETE
+    LLM USED: YES — re-runs full process_event_description()
+    DB: Updates dynamic_config with improved config
+
+    Example flow:
+    1. Committee describes event → INCOMPLETE
+       System asks: "What is the submission deadline?"
+    2. Committee answers: "Deadline is 6pm on Day 2"
+    3. This endpoint combines both and re-parses → hopefully READY
+    """
+    import traceback
+    try:
+        event = db.query(Event).filter(Event.id == request.event_id).first()
+        if not event:
+            raise HTTPException(status_code=404, detail="Event not found")
+
+        # Combine original description with the new answers
+        # so the LLM has full context when re-parsing
+        combined_description = f"""Original description:
+{request.original_description}
+
+Additional information provided:
+{request.answers}"""
+
+        # Re-run the full pipeline with combined info
+        result = process_event_description(combined_description)
+
+        # Update the stored config
+        if result["config"]:
+            import json
+            event.dynamic_config = json.dumps(result["config"])
+            db.commit()
+
+        return {
+            "event_id": request.event_id,
+            "status": result["status"],
+            "config": result["config"],
+            "questions": result["questions"],
+            "contradictions": result["contradictions"],
+            "summary": result["summary"]
+        }
+
+    except HTTPException:
+        raise
+    except Exception as e:
+        traceback.print_exc()
+        raise HTTPException(status_code=500, detail=str(e))
+
+
+@app.post("/api/events/configure/confirm")
+def confirm_event_config(
+    request: ConfirmConfigRequest,
+    db: Session = Depends(get_db)
+):
+    """
+    Committee confirms the summary is correct.
+    This activates the dynamic config — event now runs
+    entirely from what the committee described.
+
+    FRONTEND: Called when committee clicks "Yes, this is correct"
+              after seeing the summary from /configure
+    LLM USED: NO
+    DB: Marks dynamic_config as confirmed, updates event fields
+        to match the dynamic config values
+    """
+    import json
+    try:
+        event = db.query(Event).filter(Event.id == request.event_id).first()
+        if not event:
+            raise HTTPException(status_code=404, detail="Event not found")
+
+        if not request.confirmed:
+            return {
+                "message": "Configuration not confirmed. "
+                           "Please re-describe your event or adjust the details."
+            }
+
+        if not event.dynamic_config:
+            raise HTTPException(
+                status_code=400,
+                detail="No configuration found. "
+                       "Please run /api/events/configure first."
+            )
+
+        # Load the saved config
+        config = json.loads(event.dynamic_config)
+
+        # Update the event's standard fields from dynamic config
+        # So existing endpoints (team formation, evaluation, etc.)
+        # automatically use the committee's custom values
+        if config.get("team_size"):
+            event.team_size = config["team_size"]
+
+        if config.get("team_rules"):
+            rules = config["team_rules"]
+            if rules.get("skill_balance") is not None:
+                event.skill_balance = rules["skill_balance"]
+            if rules.get("no_same_institution") is not None:
+                event.no_same_institution = rules["no_same_institution"]
+
+        if config.get("evaluation", {}).get("anomaly_threshold"):
+            event.anomaly_threshold = config["evaluation"]["anomaly_threshold"]
+
+        if config.get("event_name"):
+            event.name = config["event_name"]
+
+        event.current_stage = "PARTICIPANT_INTAKE"
+        db.commit()
+
+        return {
+            "message": "Event configured successfully from your description. "
+                       "You can now upload participants and begin.",
+            "event_id": event.id,
+            "active_config": config
+        }
+
+    except HTTPException:
+        raise
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=str(e))
+
+
+@app.get("/api/events/{event_id}/config")
+def get_event_config(event_id: int, db: Session = Depends(get_db)):
+    """
+    Returns the current configuration for an event.
+    Shows both standard fields and dynamic config if present.
+
+    FRONTEND: Called to show committee what the current event config is
+    LLM USED: NO
+    DB: Reads from events table
+    """
+    import json
+    event = db.query(Event).filter(Event.id == event_id).first()
+    if not event:
+        raise HTTPException(status_code=404, detail="Event not found")
+
+    result = {
+        "event_id": event.id,
+        "event_name": event.name,
+        "team_size": event.team_size,
+        "skill_balance": event.skill_balance,
+        "no_same_institution": event.no_same_institution,
+        "anomaly_threshold": event.anomaly_threshold,
+        "current_stage": event.current_stage,
+        "is_dynamically_configured": event.dynamic_config is not None
+    }
+
+    if event.dynamic_config:
+        result["dynamic_config"] = json.loads(event.dynamic_config)
+
+    return result

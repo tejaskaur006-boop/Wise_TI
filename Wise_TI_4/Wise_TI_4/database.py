@@ -29,6 +29,7 @@ class Event(Base):
     skill_balance    = Column(Boolean, default=True)
     no_same_institution = Column(Boolean, default=True)
     anomaly_threshold = Column(Float, default=20.0)  # score deviation threshold
+    dynamic_config      = Column(Text, nullable=True)   
     created_at       = Column(DateTime, default=datetime.utcnow)
 
 
