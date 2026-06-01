@@ -127,54 +127,74 @@ Return JSON with exactly this structure:
 def find_config_gaps(config: dict) -> list:
     """
     Checks the parsed config for missing critical information.
-    Returns a list of questions the committee must answer,
-    or an empty list if the config is complete.
-    
-    CALLED BY: main.py in POST /api/events/configure
-    CALLS: call_llm() from llm_service.py
+    Fixed version — handles Qwen3's tendency to repeat JSON.
     """
-    
+    import re
+
+    # First do a simple Python check for truly critical fields
+    # This avoids an LLM call for obvious cases
+    critical_missing = []
+
+    if not config.get("team_size"):
+        critical_missing.append("What is the team size (how many people per team)?")
+
+    if not config.get("stages"):
+        critical_missing.append("What are the stages or phases of your event?")
+
+    eval_section = config.get("evaluation", {})
+    if eval_section.get("judges_count") and not eval_section.get("criteria"):
+        critical_missing.append("What are the scoring criteria and their percentage weights?")
+
+    if eval_section.get("judges_count", 0) > 1 and not eval_section.get("anomaly_threshold"):
+        critical_missing.append("What score difference should trigger an anomaly flag?")
+
+    # If we already found critical missing fields, return them
+    # No need to call LLM
+    if critical_missing:
+        return critical_missing
+
+    # Everything critical is present — ask LLM only for non-obvious gaps
     system = """You are an event configuration validator.
-Your job is to find missing information that would prevent running the event.
-Be practical — only ask for information that is truly essential.
-If configuration is complete enough to run the event, respond with exactly: COMPLETE
-If gaps exist, respond with a numbered list of specific questions. Nothing else."""
+Look at this event config and decide if it has enough information to run.
+YOU MUST respond with ONLY one of these two options:
+Option A: The single word COMPLETE (if enough info exists)
+Option B: A numbered list of questions (if critical info is missing)
+DO NOT repeat the JSON. DO NOT add explanation. ONLY respond with COMPLETE or questions."""
 
-    user = f"""Check this event configuration for missing critical information:
+    user = f"""Event config to validate:
+team_size: {config.get('team_size')}
+stages count: {len(config.get('stages', []))}
+judges: {config.get('evaluation', {}).get('judges_count')}
+criteria: {config.get('evaluation', {}).get('criteria')}
+anomaly_threshold: {config.get('evaluation', {}).get('anomaly_threshold')}
+top_n: {config.get('progression', {}).get('top_n')}
 
-{json.dumps(config, indent=2)}
+Is there enough information to run this event?
+If yes: respond COMPLETE
+If no: list only the missing critical fields as questions"""
 
-Critical fields that MUST be present:
-- team_size (how many people per team)
-- at least one stage defined
-- evaluation criteria with weights (if evaluation stage exists)
-- anomaly_threshold (if multiple judges)
-- progression top_n (how many teams advance)
+    response = call_llm(system, user, max_tokens=200)
 
-Only ask about truly missing fields. If a field is null but not critical, ignore it.
-
-If complete: respond COMPLETE
-If gaps: numbered list of questions only, nothing else."""
-
-    response = call_llm(system, user, max_tokens=400)
-    
-    # Remove <think> tags from Qwen3
+    # Remove <think> tags
     response = re.sub(r'<think>.*?</think>', '', response, flags=re.DOTALL).strip()
-    
-    if response.strip().upper() == "COMPLETE":
+
+    # If response contains JSON characters it repeated the config — treat as COMPLETE
+    if '{' in response or '"event_name"' in response:
         return []
-    
-    # Parse numbered list into array
+
+    if "COMPLETE" in response.upper():
+        return []
+
+    # Parse numbered questions
     lines = response.strip().split("\n")
     questions = []
     for line in lines:
         line = line.strip()
-        if line and not line.upper() == "COMPLETE":
-            # Remove numbering like "1." or "1)"
+        if line and "COMPLETE" not in line.upper() and '{' not in line:
             cleaned = re.sub(r'^[\d]+[.)]\s*', '', line).strip()
-            if cleaned:
+            if cleaned and len(cleaned) > 10:  # ignore very short lines
                 questions.append(cleaned)
-    
+
     return questions
 
 
