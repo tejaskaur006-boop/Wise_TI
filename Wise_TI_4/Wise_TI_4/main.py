@@ -1034,3 +1034,19 @@ def get_event_config(event_id: int, db: Session = Depends(get_db)):
         result["dynamic_config"] = json.loads(event.dynamic_config)
 
     return result
+
+@app.get("/api/judges/{judge_id}/guides")
+def get_judge_guides(judge_id: int, db: Session = Depends(get_db)):
+    """
+    Returns all evaluation guides for a specific judge.
+    FRONTEND: Called when judge portal loads to show guides.
+    """
+    guides = db.query(EvaluationGuide).filter(
+        EvaluationGuide.judge_id == judge_id
+    ).all()
+    teams_map = {t.id: t.name for t in db.query(Team).all()}
+    return [{
+        "team_id": g.team_id,
+        "team_name": teams_map.get(g.team_id, "Unknown"),
+        "content": g.content
+    } for g in guides]
