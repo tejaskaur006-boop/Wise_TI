@@ -1,4 +1,6 @@
+# features/team_formation.py
 import random
+import traceback
 from llm_service import call_llm
 
 # ─────────────────────────────────────────────
@@ -9,26 +11,13 @@ from llm_service import call_llm
 def form_teams(participants: list, team_size: int, no_same_institution: bool) -> list:
     """
     Groups participants into balanced teams.
-    
-    participants = list of Participant objects from the database
-    team_size    = number of people per team (set by committee)
-    no_same_institution = whether two people from same college can be on same team
-    
-    Returns: list of teams, where each team is a list of participants
-    
-    CALLED BY: main.py in the POST /api/teams/form endpoint
-    CALLS: generate_team_rationale() after forming each team
     """
-    
-    # Sort participants by skills so we can spread them evenly
-    # This ensures each team gets different skill types
     sorted_participants = sorted(participants, key=lambda p: p.skills)
     
     teams = []
-    used = set()  # track who has already been assigned
+    used = set()
     team_number = 1
     
-    # Team names — add more if you have many teams
     team_names = [
         "Team Orion", "Team Nova", "Team Zenith", "Team Phoenix",
         "Team Atlas", "Team Apex", "Team Helix", "Team Nexus",
@@ -44,32 +33,26 @@ def form_teams(participants: list, team_size: int, no_same_institution: bool) ->
         team = [anchor]
         used.add(anchor.id)
         
-        # Try to fill the rest of the team
         for candidate in sorted_participants:
             if len(team) >= team_size:
                 break
             if candidate.id in used:
                 continue
             
-            # Check institution constraint
             if no_same_institution:
                 team_institutions = [m.institution for m in team]
                 if candidate.institution in team_institutions:
                     continue
             
-            # Check skill diversity — prefer different skills
             team_skills = []
             for m in team:
                 team_skills.extend(m.skills.split(","))
             candidate_skills = candidate.skills.split(",")
             
-            # Add if at least one skill is different
             if any(s.strip() not in team_skills for s in candidate_skills):
                 team.append(candidate)
                 used.add(candidate.id)
         
-        # If we couldn't fill the team due to constraints,
-        # fill with anyone remaining
         for candidate in sorted_participants:
             if len(team) >= team_size:
                 break
@@ -90,30 +73,25 @@ def form_teams(participants: list, team_size: int, no_same_institution: bool) ->
 
 
 # ─────────────────────────────────────────────
-# PART 2: LLM RATIONALE GENERATION
-# Called after algorithm forms teams
+# PART 2: LLM RATIONALE GENERATION (WITH FALLBACK)
 # ─────────────────────────────────────────────
 
 def generate_team_rationale(team_name: str, members: list, rules: dict) -> str:
     """
     Takes a formed team and asks the LLM to explain why this grouping makes sense.
-    
-    team_name = "Team Orion"
-    members   = list of Participant objects
-    rules     = {"team_size": 3, "skill_balance": True, "no_same_institution": True}
-    
-    Returns: plain text rationale string (3-4 sentences)
-    
-    CALLED BY: main.py after form_teams() returns results
-    CALLS: call_llm() from llm_service.py
+    NOW WITH FALLBACK if LLM fails!
     """
     
     # Build a readable description of each member
     members_text = ""
+    skills_set = set()
+    institutions_set = set()
     for m in members:
         members_text += f"- {m.name} | Skills: {m.skills} | Institution: {m.institution} | Experience: {m.experience} years\n"
+        for s in m.skills.split(","):
+            skills_set.add(s.strip())
+        institutions_set.add(m.institution)
     
-    # Build rules description
     rules_parts = []
     if rules.get("skill_balance"):
         rules_parts.append("balanced skill sets required")
@@ -121,16 +99,54 @@ def generate_team_rationale(team_name: str, members: list, rules: dict) -> str:
         rules_parts.append("no two members from same institution")
     rules_text = ", ".join(rules_parts) if rules_parts else "standard grouping"
     
-    system = "You are a hackathon coordinator assistant. Write clear, professional team rationales in exactly 3-4 sentences."
+    # Try LLM first
+    print(f"\n🤖 Generating rationale for {team_name}...")
+    print(f"   Members: {len(members)}")
+    print(f"   Skills: {skills_set}")
+    print(f"   Institutions: {institutions_set}")
     
-    user = f"""Team name: {team_name}
+    try:
+        system = "You are a hackathon coordinator. Write a clear team rationale in 3-4 sentences. Return ONLY plain text, no JSON, no markdown."
+        user = f"""Team: {team_name}
 Members:
 {members_text}
-Rules applied: {rules_text}
+Rules: {rules_text}
 
-Write a 3-4 sentence rationale explaining why this specific team composition makes sense. 
-Focus on skill complementarity and how the members can work together effectively."""
+Write a 3-4 sentence rationale for this team composition."""
+        
+        rationale = call_llm(system, user, max_tokens=250)
+        
+        print(f"   ✅ LLM returned ({len(rationale)} chars): {rationale[:100]}...")
+        
+        if rationale and len(rationale.strip()) > 20:
+            return rationale.strip()
+        else:
+            print(f"   ⚠️ LLM response too short, using fallback")
     
-    # LLM writes the rationale
-    # This text gets saved to the database and shown on the committee dashboard
-    return call_llm(system, user, max_tokens=250)
+    except Exception as e:
+        print(f"   ❌ LLM call failed: {e}")
+        traceback.print_exc()
+    
+    # FALLBACK: Generate manual rationale
+    print(f"   📝 Using fallback rationale for {team_name}")
+    
+    skills_list = ", ".join(sorted(list(skills_set))[:5])  # Top 5 skills
+    if len(skills_set) > 5:
+        skills_list += f" and {len(skills_set) - 5} more"
+    
+    num_institutions = len(institutions_set)
+    num_members = len(members)
+    avg_experience = sum(m.experience for m in members) / len(members) if members else 0
+    
+    fallback = (
+        f"Team {team_name} was formed to bring together {num_members} members with complementary "
+        f"technical skills including {skills_list}. "
+        f"The team represents {num_institutions} different institution{'s' if num_institutions > 1 else ''}, "
+        f"ensuring diverse perspectives and backgrounds in line with the event rules. "
+        f"With an average experience of {avg_experience:.1f} years, the members can collaborate effectively "
+        f"on both technical implementation and creative problem-solving. "
+        f"This balanced composition allows the team to handle full-stack development with a mix of "
+        f"frontend, backend, and specialized capabilities."
+    )
+    
+    return fallback

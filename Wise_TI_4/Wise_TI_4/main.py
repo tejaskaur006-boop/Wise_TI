@@ -506,6 +506,21 @@ def list_judges(event_id: int, db: Session = Depends(get_db)):
     judges = db.query(Judge).filter(Judge.event_id == event_id).all()
     return [{"id": j.id, "name": j.name, "email": j.email} for j in judges]
 
+@app.get("/api/judges/{judge_id}/evaluated-teams")
+def get_evaluated_teams(judge_id: int, db: Session = Depends(get_db)):
+    """
+    Returns team IDs that this judge has already scored.
+    """
+    from database import Score
+    
+    scores = db.query(Score).filter(Score.judge_id == judge_id).all()
+    evaluated_team_ids = list(set([s.team_id for s in scores]))
+    
+    return {
+        "judge_id": judge_id,
+        "evaluated_team_ids": evaluated_team_ids,
+        "count": len(evaluated_team_ids)
+    }
 
 # ─────────────────────────────────────────────
 # SECTION 6: EVALUATION
@@ -531,6 +546,7 @@ def start_evaluation(event_id: int, request: StartEvaluationRequest, db: Session
         raise HTTPException(status_code=400, detail="No approved teams found")
     
     guides_created = 0
+    guides_skipped = 0  # ✅ Track how many we skipped
     emails_drafted = 0
     
     for judge in judges:
@@ -563,10 +579,21 @@ def start_evaluation(event_id: int, request: StartEvaluationRequest, db: Session
             members = db.query(Participant).filter(Participant.team_id == team.id).all()
             skills = list(set([s.strip() for m in members for s in m.skills.split(",")]))
             
+            # ✅ CHECK: Don't create duplicate guide for same judge + team
+            existing_guide = db.query(EvaluationGuide).filter(
+                EvaluationGuide.judge_id == judge.id,
+                EvaluationGuide.team_id == team.id
+            ).first()
+            
+            if existing_guide:
+                print(f"⏭️  Guide already exists for Judge {judge.id} + Team {team.id}, skipping")
+                guides_skipped += 1
+                continue  # Skip if already exists
+            
             guide_content = generate_evaluation_guide(
                 judge_name=judge.name,
                 team_name=team.name,
-                project_description="IoT Smart Energy Monitoring",  # update with real problem
+                project_description="IoT Smart Energy Monitoring",
                 team_skills=skills,
                 criteria=request.criteria,
                 minutes_per_team=request.minutes_per_team
@@ -579,7 +606,9 @@ def start_evaluation(event_id: int, request: StartEvaluationRequest, db: Session
                 content=guide_content
             )
             db.add(guide)
+            db.commit()  # ✅ Commit after each guide
             guides_created += 1
+            print(f"✅ Guide created for Judge {judge.name} + Team {team.name}")
     
     # Update event stage
     event = db.query(Event).filter(Event.id == event_id).first()
@@ -589,8 +618,10 @@ def start_evaluation(event_id: int, request: StartEvaluationRequest, db: Session
     return {
         "message": "Evaluation phase started",
         "guides_created": guides_created,
+        "guides_skipped": guides_skipped,  # ✅ Show how many were duplicates
         "emails_drafted": emails_drafted
     }
+
 
 
 @app.post("/api/scores/submit")
@@ -1050,3 +1081,44 @@ def get_judge_guides(judge_id: int, db: Session = Depends(get_db)):
         "team_name": teams_map.get(g.team_id, "Unknown"),
         "content": g.content
     } for g in guides]
+
+# Add this near the other endpoints in main.py
+@app.get("/api/debug/evaluations/{event_id}")
+def debug_evaluations(event_id: int, db: Session = Depends(get_db)):
+    """
+    DEBUG ENDPOINT: Shows all judges and their assigned teams for an event.
+    Visit: http://localhost:8000/api/debug/evaluations/1
+    """
+    from database import Judge, Team, EvaluationGuide
+    
+    judges = db.query(Judge).filter(Judge.event_id == event_id).all()
+    teams = db.query(Team).filter(Team.event_id == event_id).all()
+    approved_teams = [t for t in teams if t.status == "APPROVED"]
+    guides = db.query(EvaluationGuide).filter(EvaluationGuide.event_id == event_id).all()
+    
+    result = {
+        "event_id": event_id,
+        "total_judges": len(judges),
+        "total_teams": len(teams),
+        "approved_teams": len(approved_teams),
+        "total_guides": len(guides),
+        "judges": [
+            {
+                "id": j.id,
+                "name": j.name,
+                "email": j.email,
+                "guides_count": len([g for g in guides if g.judge_id == j.id]),
+                "assigned_teams": [
+                    {"team_id": g.team_id, "team_name": next((t.name for t in teams if t.id == g.team_id), "Unknown")}
+                    for g in guides if g.judge_id == j.id
+                ]
+            }
+            for j in judges
+        ],
+        "all_teams": [
+            {"id": t.id, "name": t.name, "status": t.status}
+            for t in teams
+        ]
+    }
+    
+    return result
