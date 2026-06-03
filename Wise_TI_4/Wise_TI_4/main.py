@@ -769,12 +769,10 @@ def get_dashboard(event_id: int, db: Session = Depends(get_db)):
 @app.get("/api/participants/{participant_id}/status")
 def get_participant_status(participant_id: int, db: Session = Depends(get_db)):
     """
-    Returns a participant's current status for their read-only portal.
-    
-    FRONTEND: This is what the participant portal page shows
-    LLM USED: No
-    DB: Reads from participants, teams, scores, communications tables
+    Returns a participant's complete read-only status.
     """
+    from database import Score, Anomaly
+    
     participant = db.query(Participant).filter(Participant.id == participant_id).first()
     if not participant:
         raise HTTPException(status_code=404, detail="Participant not found")
@@ -783,16 +781,22 @@ def get_participant_status(participant_id: int, db: Session = Depends(get_db)):
     
     result = {
         "name": participant.name,
-        "event_name": event.name,
-        "current_stage": event.current_stage,
+        "email": participant.email,
+        "event_name": event.name if event else "Unknown",
+        "current_stage": event.current_stage if event else "UNKNOWN",
         "team": None,
         "teammates": [],
         "key_dates": {
             "submission_deadline": "June 16, 2025 at 6:00 PM",
-            "results_announcement": "June 17, 2025"
-        }
+            "results_announcement": "June 17, 2025",
+            "evaluation_deadline": "June 16, 2025 at 8:00 PM"
+        },
+        "score": None,
+        "feedback": None,
+        "progression": None
     }
     
+    # Team info
     if participant.team_id:
         team = db.query(Team).filter(Team.id == participant.team_id).first()
         teammates = db.query(Participant).filter(
@@ -800,8 +804,56 @@ def get_participant_status(participant_id: int, db: Session = Depends(get_db)):
             Participant.id != participant_id
         ).all()
         
-        result["team"] = {"name": team.name, "status": team.status}
-        result["teammates"] = [{"name": t.name, "skills": t.skills} for t in teammates]
+        if team:
+            result["team"] = {
+                "id": team.id,
+                "name": team.name,
+                "status": team.status
+            }
+            result["teammates"] = [
+                {"name": t.name, "skills": t.skills, "email": t.email}
+                for t in teammates
+            ]
+            
+            # Calculate team's average score
+            scores = db.query(Score).filter(Score.team_id == team.id).all()
+            if scores and team.status == "APPROVED":
+                avg = sum([s.score for s in scores]) / len(scores)
+                result["score"] = round(avg, 1)
+                result["feedback"] = "Your team has been evaluated. See detailed feedback in your email."
+    
+    # ✅ NEW: Check if participant qualifies (top N from leaderboard)
+    if event and result["score"]:
+        # Get all approved teams with scores
+        teams_with_scores = []
+        approved_teams = db.query(Team).filter(
+            Team.event_id == event.id,
+            Team.status == "APPROVED"
+        ).all()
+        
+        for t in approved_teams:
+            t_scores = db.query(Score).filter(Score.team_id == t.id).all()
+            if t_scores:
+                avg = sum([s.score for s in t_scores]) / len(t_scores)
+                teams_with_scores.append({"team_id": t.id, "avg": avg, "name": t.name})
+        
+        # Sort by average score descending
+        teams_with_scores.sort(key=lambda x: x["avg"], reverse=True)
+        
+        # Top 3 qualify
+        top_n = 3
+        for rank, t in enumerate(teams_with_scores[:top_n], 1):
+            if t["team_id"] == participant.team_id:
+                result["progression"] = {
+                    "qualified": True,
+                    "rank": rank,
+                    "score": result["score"],
+                    "next_round": "Round 2",
+                    "next_round_date": "June 20, 2025",
+                    "confirmation_deadline": "June 18, 2025 at 12:00 PM",
+                    "confirmation_status": None  # Frontend will manage this
+                }
+                break
     
     return result
 
