@@ -42,12 +42,29 @@ Scoring criteria:
 {criteria_text}
 
 Create a guide with these exact sections:
-1. WHAT TO LOOK FOR (specific things to observe for THIS project under each criterion)
-2. QUESTIONS TO ASK (3 questions tailored to this specific team's project)
-3. RED FLAGS (3 warning signs specific to this type of project)
-4. SCORING TABLE (breakdown showing how to distribute points within each criterion)
 
-Make it specific to this team's project, not generic."""
+1. WHAT TO LOOK FOR
+For each criterion, list 3-4 specific things to observe.
+Format: "Innovation: Look for X, Y, Z"
+
+2. QUESTIONS TO ASK  
+Three questions tailored to this specific team's project.
+Format: "1. Question one?"
+       "2. Question two?"
+       "3. Question three?"
+
+3. RED FLAGS
+Three warning signs specific to this type of project.
+Format: "- Red flag one"
+       "- Red flag two"
+       "- Red flag three"
+
+4. SCORING DISTRIBUTION
+Show how to distribute points within each criterion.
+Format: "Innovation (40 points): 10-15 for X, 15-25 for Y, 25-40 for Z"
+
+IMPORTANT: Use plain text only. No markdown tables, no asterisks for bold, 
+no hash headers, no pipe characters. Just clean readable text with dashes and numbers."""
     
     # Returns markdown text saved to evaluation_guides table
     # Shown to judge when they open their evaluation portal
