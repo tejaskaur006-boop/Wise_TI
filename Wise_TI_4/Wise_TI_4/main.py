@@ -10,11 +10,22 @@ import secrets
 import string
 import os
 from datetime import datetime
-from database import User, create_user, get_user_by_email, verify_user, generate_random_password
+from database import User, create_user, get_user_by_email, verify_user, generate_random_password, Team
 # Add this with your other imports at the top of main.py
 from werkzeug.security import generate_password_hash, check_password_hash
 from sendgrid import SendGridAPIClient
 from sendgrid.helpers.mail import Mail
+# Add this at the top with other imports (NOT inside the function)
+from features.email_drafting import (
+    draft_team_assignment_email,
+    draft_evaluation_request_email,
+    draft_deadline_reminder_email,
+    draft_results_email,
+    draft_welcome_credentials_email,      # ← Add this
+    draft_progression_invitation_email,   # ← Add this
+    draft_anomaly_reevaluation_email      # ← Add this
+)
+
 # Committee code from environment variable (with fallback)
 COMMITTEE_CODE = os.getenv("COMMITTEE_CODE", "TI2025HACK")
 
@@ -325,7 +336,7 @@ async def upload_participants(event_id: int, file: UploadFile = File(...), db: S
     """
     Upload participants from CSV with validation.
     """
-    from email_drafting import draft_welcome_credentials_email
+    
     
     # Validate file type
     if not file.filename.endswith('.csv'):
@@ -672,14 +683,6 @@ def get_approvals(event_id: int, db: Session = Depends(get_db)):
 def reform_teams(event_id: int, db: Session = Depends(get_db)):
     """
     Re-form teams using ONLY unassigned participants.
-    
-    This includes:
-    - Participants who never had a team (from initial CSV upload)
-    - Members of teams that were REJECTED (their team_id was set to None)
-    
-    This does NOT include:
-    - Members of APPROVED teams (they keep their team)
-    - Members of teams in evaluation phase
     """
     import traceback
     try:
@@ -687,7 +690,7 @@ def reform_teams(event_id: int, db: Session = Depends(get_db)):
         if not event:
             raise HTTPException(status_code=404, detail="Event not found")
         
-        # Archive old rejected teams (mark them so they don't show in active lists)
+        # Archive old rejected teams
         rejected_teams = db.query(Team).filter(
             Team.event_id == event_id,
             Team.status == "REJECTED"
@@ -704,11 +707,10 @@ def reform_teams(event_id: int, db: Session = Depends(get_db)):
             t.status = "ARCHIVED"
         db.commit()
         
-        # ✅ CRITICAL: Get ONLY unassigned participants
-        # This query explicitly filters for team_id IS NULL
+        # ✅ Get ONLY unassigned participants
         unassigned = db.query(Participant).filter(
             Participant.event_id == event_id,
-            Participant.team_id == None  # IS NULL check
+            Participant.team_id == None
         ).all()
         
         if not unassigned:
@@ -721,6 +723,13 @@ def reform_teams(event_id: int, db: Session = Depends(get_db)):
         rejected_members = [p for p in unassigned if p.id in rejected_member_ids]
         never_assigned = [p for p in unassigned if p.id not in rejected_member_ids]
         
+        # ✅ Count approved team members (for the breakdown)
+        approved_team_members_excluded = db.query(Participant).filter(
+            Participant.event_id == event_id,
+            Participant.team_id != None,
+            Participant.id.notin_(rejected_member_ids)
+        ).count()
+        
         # Form new teams from unassigned
         rules = {
             "team_size": event.team_size,
@@ -732,7 +741,6 @@ def reform_teams(event_id: int, db: Session = Depends(get_db)):
         
         saved_teams = []
         for idx, team_data in enumerate(formed_teams):
-            # Name with "Ref" suffix to distinguish from original teams
             ref_name = f"{team_data['name']} (Reform {idx + 1})"
             
             team = Team(
@@ -744,14 +752,12 @@ def reform_teams(event_id: int, db: Session = Depends(get_db)):
             db.commit()
             db.refresh(team)
             
-            # Assign members
             for member in team_data["members"]:
                 participant = db.query(Participant).filter(Participant.id == member.id).first()
                 if participant:
                     participant.team_id = team.id
             db.commit()
             
-            # Generate AI rationale
             rationale = generate_team_rationale(
                 team_name=team.name,
                 members=team_data["members"],
@@ -774,7 +780,7 @@ def reform_teams(event_id: int, db: Session = Depends(get_db)):
                 "total_unassigned": len(unassigned),
                 "from_rejected_teams": len(rejected_members),
                 "never_assigned": len(never_assigned),
-                "approved_team_members_excluded": sum(1 for p in participants if p.team_id and not p.id in rejected_member_ids)
+                "approved_team_members_excluded": approved_team_members_excluded  # ✅ Fixed
             }
         }
     
@@ -783,6 +789,7 @@ def reform_teams(event_id: int, db: Session = Depends(get_db)):
     except Exception as e:
         traceback.print_exc()
         raise HTTPException(status_code=500, detail=str(e))
+
 
 
 # ─────────────────────────────────────────────
@@ -862,7 +869,7 @@ def add_judge(event_id: int, request: AddJudgeRequest, db: Session = Depends(get
     """
     Adds a judge AND auto-creates a user account.
     """
-    from email_drafting import draft_welcome_credentials_email
+    
     
     # Create judge
     judge = Judge(event_id=event_id, name=request.name, email=request.email)
@@ -1152,19 +1159,22 @@ def resolve_anomaly(anomaly_id: int, request: ResolveAnomalyRequest, db: Session
     Resolve a flagged anomaly.
     If action is 'request_reevaluation', send email to the judge whose score was flagged.
     """
-    from email_drafting import draft_anomaly_reevaluation_email
+    
     from datetime import datetime
     
     anomaly = db.query(Anomaly).filter(Anomaly.id == anomaly_id).first()
     if not anomaly:
         raise HTTPException(status_code=404, detail="Anomaly not found")
     
-    # ✅ NEW: If requesting re-evaluation, send email to the judge
+    # ✅ FIX: Look up team name from team_id
+    team = db.query(Team).filter(Team.id == anomaly.team_id).first()
+    team_name = team.name if team else f"Team #{anomaly.team_id}"
+    
+    # ✅ NEW: If requesting re-evaluation, send email to the judge whose score was flagged
     if request.action == "request_reevaluation":
         # Find the score that was flagged
         scores = db.query(Score).filter(Score.team_id == anomaly.team_id).all()
         
-        # Calculate average and find outlier
         if scores:
             avg = sum(s.score for s in scores) / len(scores)
             for s in scores:
@@ -1176,7 +1186,7 @@ def resolve_anomaly(anomaly_id: int, request: ResolveAnomalyRequest, db: Session
                         # Draft re-evaluation email
                         email = draft_anomaly_reevaluation_email(
                             judge_name=judge.name,
-                            team_name=anomaly.team_name or f"Team #{anomaly.team_id}",
+                            team_name=team_name,  # ✅ Now using the looked-up name
                             anomaly_explanation=anomaly.explanation
                         )
                         
@@ -1192,9 +1202,6 @@ def resolve_anomaly(anomaly_id: int, request: ResolveAnomalyRequest, db: Session
                         )
                         db.add(comm)
                         db.commit()
-                        
-                        # Optionally mark the score for re-submission
-                        # (you could add a "needs_reevaluation" field to Score model)
     
     # Mark anomaly as resolved
     anomaly.status = "RESOLVED"
@@ -1202,6 +1209,7 @@ def resolve_anomaly(anomaly_id: int, request: ResolveAnomalyRequest, db: Session
     db.commit()
     
     return {"message": f"Anomaly resolved with action: {request.action}"}
+
 
 
 # ─────────────────────────────────────────────
