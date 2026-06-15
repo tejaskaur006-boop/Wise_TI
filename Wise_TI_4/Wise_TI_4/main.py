@@ -1,18 +1,78 @@
 from fastapi import FastAPI, Depends, HTTPException
 from fastapi.middleware.cors import CORSMiddleware
+from fastapi import File, UploadFile
 from sqlalchemy.orm import Session
 from pydantic import BaseModel
 from typing import List, Optional
 import pandas as pd
 from features.event_config_parser import process_event_description
+import secrets
+import string
+import os
+from datetime import datetime
+from database import User, create_user, get_user_by_email, verify_user, generate_random_password
+# Add this with your other imports at the top of main.py
+from werkzeug.security import generate_password_hash, check_password_hash
+from sendgrid import SendGridAPIClient
+from sendgrid.helpers.mail import Mail
+# Committee code from environment variable (with fallback)
+COMMITTEE_CODE = os.getenv("COMMITTEE_CODE", "TI2025HACK")
+
+# ════════════════════════════════════════════════════
+# EMAIL SENDING (with SendGrid + Mock Mode)
+# ════════════════════════════════════════════════════
+
+SENDGRID_API_KEY = os.getenv("SENDGRID_API_KEY", "")
+SENDER_EMAIL = os.getenv("SENDER_EMAIL", "noreply@eventflow.com")
+
+def actually_send_email(to_email: str, subject: str, body: str) -> bool:
+    """
+    Send email using SendGrid. Falls back to mock mode if no API key.
+    Returns True if sent successfully (or mocked).
+    """
+    # Mock mode - just log it
+    if not SENDGRID_API_KEY:
+        print(f"\n{'='*60}")
+        print(f"📧 [MOCK EMAIL]")
+        print(f"   To: {to_email}")
+        print(f"   Subject: {subject}")
+        print(f"   Body: {body[:150]}...")
+        print(f"{'='*60}\n")
+        return True
+    
+    # Real SendGrid mode
+    try:
+        message = Mail(
+            from_email=SENDER_EMAIL,
+            to_emails=to_email,
+            subject=subject,
+            plain_text_content=body
+        )
+        sg = SendGridAPIClient(SENDGRID_API_KEY)
+        response = sg.send(message)
+        
+        if response.status_code == 202:
+            print(f"📧 [EMAIL SENT] To: {to_email}")
+            return True
+        else:
+            print(f"❌ [EMAIL FAILED] Status: {response.status_code}")
+            return False
+    except Exception as e:
+        print(f"❌ [EMAIL ERROR] {str(e)}")
+        return False
+
+
 
 # Import database
 from database import (
     get_db, create_tables,
-    Event, Participant, Team, Judge, Score, Anomaly, Communication, EvaluationGuide,Approval,
+    Event, Participant, Team, Judge, Score, Anomaly, Communication, EvaluationGuide, Approval,
+    User,  # ← Add this
+    create_user, get_user_by_email, verify_user,  # ← Add these
     get_all_teams, get_team_members, get_scores_for_team,
     get_pending_approvals, get_leaderboard, get_activity_log
 )
+
 
 # Import all LLM features
 from features.team_formation  import form_teams, generate_team_rationale
@@ -86,6 +146,128 @@ class ResolveAnomalyRequest(BaseModel):
     action: str               # "use_average", "accept_flagged", "request_reevaluation"
 
 
+# ════════════════════════════════════════════════════
+# AUTHENTICATION ENDPOINTS
+# ════════════════════════════════════════════════════
+
+# Environment variable for committee code
+COMMITTEE_CODE = os.getenv("COMMITTEE_CODE", "TI2025HACK")
+
+class LoginRequest(BaseModel):
+    email: str
+    password: str
+    role: str  # 'COMMITTEE', 'PARTICIPANT', 'JUDGE'
+
+class CommitteeCodeRequest(BaseModel):
+    code: str
+
+@app.post("/api/auth/check-setup")
+def check_setup(db: Session = Depends(get_db)):
+    """
+    Check if any users exist (first-time setup check).
+    """
+    user_count = db.query(User).count()
+    return {
+        "needs_setup": user_count == 0,
+        "user_count": user_count
+    }
+
+@app.post("/api/auth/committee-setup")
+def committee_setup(request: CommitteeCodeRequest, db: Session = Depends(get_db)):
+    """
+    First-time committee setup. Verifies the committee code.
+    Creates a placeholder committee user.
+    """
+    if request.code != COMMITTEE_CODE:
+        raise HTTPException(status_code=401, detail="Invalid committee code")
+    
+    # Check if already set up
+    existing = db.query(User).filter(User.role == "COMMITTEE").first()
+    if existing:
+        raise HTTPException(status_code=400, detail="Committee already exists. Please login.")
+    
+    # Create a special committee user (code-based, no password)
+    # We use a dummy email since login is by code
+    user = User(
+        email="committee@eventflow.internal",
+        password_hash=generate_password_hash(secrets.token_urlsafe(32)),
+        role="COMMITTEE",
+        reference_id=None
+    )
+    db.add(user)
+    db.commit()
+    db.refresh(user)
+    
+    return {
+        "message": "Committee setup complete",
+        "user_id": user.id,
+        "role": "COMMITTEE"
+    }
+
+@app.post("/api/auth/login")
+def login(request: LoginRequest, db: Session = Depends(get_db)):
+    """
+    Login endpoint.
+    - Committee: verifies code
+    - Participant/Judge: verifies email + password
+    """
+    print(f"🔐 Login attempt: role={request.role}, email={request.email}")
+    
+    if request.role == "COMMITTEE":
+        # Committee uses code
+        if request.password != COMMITTEE_CODE:
+            print(f"❌ Invalid committee code")
+            raise HTTPException(status_code=401, detail="Invalid committee code")
+        
+        user = db.query(User).filter(User.role == "COMMITTEE").first()
+        if not user:
+            print(f"❌ Committee not set up yet")
+            raise HTTPException(status_code=404, detail="Committee not set up yet")
+        
+        user.last_login = datetime.utcnow()
+        db.commit()
+        
+        print(f"✓ Committee login successful")
+        return {
+            "user_id": user.id,
+            "email": "committee",
+            "role": "COMMITTEE",
+            "name": "Committee Member"
+        }
+    else:
+        # Participant/Judge uses email + password
+        user = verify_user(db, request.email, request.password)
+        if not user:
+            print(f"❌ Invalid credentials for {request.email}")
+            raise HTTPException(status_code=401, detail="Invalid email or password")
+        
+        if user.role != request.role:
+            print(f"❌ Role mismatch: user is {user.role}, tried {request.role}")
+            raise HTTPException(status_code=403, detail=f"This account is not a {request.role.lower()}")
+        
+        # Get name from reference
+        name = "User"
+        if user.role == "PARTICIPANT" and user.reference_id:
+            p = db.query(Participant).filter(Participant.id == user.reference_id).first()
+            if p: name = p.name
+        elif user.role == "JUDGE" and user.reference_id:
+            j = db.query(Judge).filter(Judge.id == user.reference_id).first()
+            if j: name = j.name
+        
+        user.last_login = datetime.utcnow()
+        db.commit()
+        
+        print(f"✓ {user.role} login successful: {name}")
+        return {
+            "user_id": user.id,
+            "email": user.email,
+            "role": user.role,
+            "name": name,
+            "reference_id": user.reference_id
+        }
+
+
+
 # ─────────────────────────────────────────────
 # SECTION 1: EVENT SETUP
 # ─────────────────────────────────────────────
@@ -139,53 +321,117 @@ def get_event(event_id: int, db: Session = Depends(get_db)):
 # ─────────────────────────────────────────────
 
 @app.post("/api/events/{event_id}/participants/upload")
-async def upload_participants(event_id: int, db: Session = Depends(get_db)):
+async def upload_participants(event_id: int, file: UploadFile = File(...), db: Session = Depends(get_db)):
     """
-    Loads participants from a CSV file into the database.
-    
-    FRONTEND: Called when committee uploads participant CSV
-              The CSV should have columns: name, email, skills, institution, experience
-    LLM USED: No
-    DB: Writes to participants table
-    
-    CSV FORMAT EXPECTED:
-    name,email,skills,institution,experience
-    Rahul Sharma,rahul@email.com,"ML,Python",IIT Delhi,3
-    Priya Singh,priya@email.com,"Frontend,React",BITS Pilani,2
+    Upload participants from CSV with validation.
     """
+    from email_drafting import draft_welcome_credentials_email
     
-    # NOTE FOR FRONTEND TEAM:
-    # This endpoint needs multipart/form-data with a "file" field
-    # For now, we load from a fixed path for testing
-    # Frontend will send: FormData with file attached
+    # Validate file type
+    if not file.filename.endswith('.csv'):
+        raise HTTPException(status_code=400, detail="File must be a CSV")
+    
+    # Read file
+    contents = await file.read()
     
     try:
-        df = pd.read_csv("sample_participants.csv")
-        
-        count = 0
-        for _, row in df.iterrows():
+        import io
+        df = pd.read_csv(io.StringIO(contents.decode('utf-8')))
+    except Exception as e:
+        raise HTTPException(status_code=400, detail=f"Invalid CSV format: {str(e)}")
+    
+    # Validate required columns
+    required_cols = ['name', 'email', 'skills', 'institution', 'experience']
+    missing_cols = [col for col in required_cols if col not in df.columns]
+    if missing_cols:
+        raise HTTPException(
+            status_code=400, 
+            detail=f"Missing required columns: {', '.join(missing_cols)}"
+        )
+    
+    count = 0
+    errors = []
+    
+    for idx, row in df.iterrows():
+        try:
+            # Validate email format
+            email = str(row['email']).strip()
+            if '@' not in email or '.' not in email:
+                errors.append(f"Row {idx+2}: Invalid email '{email}'")
+                continue
+            
+            # Validate experience is numeric
+            try:
+                exp = int(row['experience'])
+            except (ValueError, TypeError):
+                errors.append(f"Row {idx+2}: Experience must be a number")
+                continue
+            
+            # Validate name
+            name = str(row['name']).strip()
+            if not name:
+                errors.append(f"Row {idx+2}: Name is required")
+                continue
+            
+            # Create participant
             participant = Participant(
                 event_id=event_id,
-                name=row["name"],
-                email=row["email"],
-                skills=row["skills"],
-                institution=row["institution"],
-                experience=int(row["experience"])
+                name=name,
+                email=email,
+                skills=str(row['skills']).strip(),
+                institution=str(row['institution']).strip(),
+                experience=exp
             )
             db.add(participant)
+            db.flush()
+            
+            # Auto-create user account
+            try:
+                random_password = generate_random_password(8)
+                user, plain_password = create_user(
+                    db, email=email, password=random_password,
+                    role="PARTICIPANT", reference_id=participant.id
+                )
+                
+                # Draft welcome email
+                email_content = draft_welcome_credentials_email(
+                    participant_name=name, email=email, password=random_password
+                )
+                
+                comm = Communication(
+                    event_id=event_id,
+                    recipient_id=participant.id,
+                    recipient_type="PARTICIPANT",
+                    type="WELCOME_CREDENTIALS",
+                    subject=email_content["subject"],
+                    body=email_content["body"],
+                    status="DRAFT"
+                )
+                db.add(comm)
+            except Exception as e:
+                # Email might already exist
+                pass
+            
             count += 1
-        
-        db.commit()
-        
-        # Update event stage
-        event = db.query(Event).filter(Event.id == event_id).first()
+        except Exception as e:
+            errors.append(f"Row {idx+2}: {str(e)}")
+            continue
+    
+    db.commit()
+    
+    # Update event stage
+    event = db.query(Event).filter(Event.id == event_id).first()
+    if event:
         event.current_stage = "TEAM_FORMATION"
         db.commit()
-        
-        return {"message": f"{count} participants loaded successfully", "count": count}
     
-    except Exception as e:
-        raise HTTPException(status_code=400, detail=str(e))
+    return {
+        "message": f"{count} participants loaded successfully",
+        "count": count,
+        "errors": errors if errors else None
+    }
+
+
 
 
 @app.get("/api/events/{event_id}/participants")
@@ -422,6 +668,123 @@ def get_approvals(event_id: int, db: Session = Depends(get_db)):
         "created_at": str(a.created_at)
     } for a in approvals]
 
+@app.post("/api/events/{event_id}/teams/reform")
+def reform_teams(event_id: int, db: Session = Depends(get_db)):
+    """
+    Re-form teams using ONLY unassigned participants.
+    
+    This includes:
+    - Participants who never had a team (from initial CSV upload)
+    - Members of teams that were REJECTED (their team_id was set to None)
+    
+    This does NOT include:
+    - Members of APPROVED teams (they keep their team)
+    - Members of teams in evaluation phase
+    """
+    import traceback
+    try:
+        event = db.query(Event).filter(Event.id == event_id).first()
+        if not event:
+            raise HTTPException(status_code=404, detail="Event not found")
+        
+        # Archive old rejected teams (mark them so they don't show in active lists)
+        rejected_teams = db.query(Team).filter(
+            Team.event_id == event_id,
+            Team.status == "REJECTED"
+        ).all()
+        
+        # Get the members of rejected teams BEFORE we archive them
+        rejected_member_ids = []
+        for t in rejected_teams:
+            members = db.query(Participant).filter(Participant.team_id == t.id).all()
+            rejected_member_ids.extend([m.id for m in members])
+        
+        # Mark rejected teams as archived
+        for t in rejected_teams:
+            t.status = "ARCHIVED"
+        db.commit()
+        
+        # ✅ CRITICAL: Get ONLY unassigned participants
+        # This query explicitly filters for team_id IS NULL
+        unassigned = db.query(Participant).filter(
+            Participant.event_id == event_id,
+            Participant.team_id == None  # IS NULL check
+        ).all()
+        
+        if not unassigned:
+            raise HTTPException(
+                status_code=400, 
+                detail="No unassigned participants. All participants are already in teams."
+            )
+        
+        # Categorize for better UX
+        rejected_members = [p for p in unassigned if p.id in rejected_member_ids]
+        never_assigned = [p for p in unassigned if p.id not in rejected_member_ids]
+        
+        # Form new teams from unassigned
+        rules = {
+            "team_size": event.team_size,
+            "skill_balance": event.skill_balance,
+            "no_same_institution": event.no_same_institution
+        }
+        
+        formed_teams = form_teams(unassigned, event.team_size, event.no_same_institution)
+        
+        saved_teams = []
+        for idx, team_data in enumerate(formed_teams):
+            # Name with "Ref" suffix to distinguish from original teams
+            ref_name = f"{team_data['name']} (Reform {idx + 1})"
+            
+            team = Team(
+                event_id=event_id,
+                name=ref_name,
+                status="PENDING_APPROVAL"
+            )
+            db.add(team)
+            db.commit()
+            db.refresh(team)
+            
+            # Assign members
+            for member in team_data["members"]:
+                participant = db.query(Participant).filter(Participant.id == member.id).first()
+                if participant:
+                    participant.team_id = team.id
+            db.commit()
+            
+            # Generate AI rationale
+            rationale = generate_team_rationale(
+                team_name=team.name,
+                members=team_data["members"],
+                rules=rules
+            )
+            team.rationale = rationale
+            db.commit()
+            
+            saved_teams.append({
+                "team_id": team.id,
+                "team_name": team.name,
+                "status": team.status,
+                "members": [m.name for m in team_data["members"]]
+            })
+        
+        return {
+            "message": f"Reformed {len(saved_teams)} teams from {len(unassigned)} unassigned participants",
+            "teams": saved_teams,
+            "breakdown": {
+                "total_unassigned": len(unassigned),
+                "from_rejected_teams": len(rejected_members),
+                "never_assigned": len(never_assigned),
+                "approved_team_members_excluded": sum(1 for p in participants if p.team_id and not p.id in rejected_member_ids)
+            }
+        }
+    
+    except HTTPException:
+        raise
+    except Exception as e:
+        traceback.print_exc()
+        raise HTTPException(status_code=500, detail=str(e))
+
+
 # ─────────────────────────────────────────────
 # SECTION 4: COMMUNICATIONS
 # ─────────────────────────────────────────────
@@ -450,28 +813,44 @@ def list_communications(event_id: int, db: Session = Depends(get_db)):
 @app.post("/api/communications/{comm_id}/approve")
 def approve_communication(comm_id: int, db: Session = Depends(get_db)):
     """
-    Approves an email draft and marks it as SENT.
-    In production, this would actually call SendGrid/email service here.
-    
-    FRONTEND: Called when committee clicks "Send" on an email preview
-    LLM USED: No
-    DB: Updates communication.status to SENT
-    
-    NOTE FOR YOUR TEAM: 
-    To actually send emails, add SendGrid here:
-    pip install sendgrid
-    Then call sendgrid_client.send(message) before updating status
+    Approve and ACTUALLY SEND an email to the recipient.
     """
     from datetime import datetime
     comm = db.query(Communication).filter(Communication.id == comm_id).first()
     if not comm:
         raise HTTPException(status_code=404, detail="Communication not found")
     
-    comm.status = "SENT"
+    # Don't re-send already sent emails
+    if comm.status == "SENT":
+        return {"message": "Email already sent", "already_sent": True}
+    
+    # Get the actual email address of the recipient
+    recipient = None
+    if comm.recipient_type == "PARTICIPANT":
+        recipient = db.query(Participant).filter(Participant.id == comm.recipient_id).first()
+    elif comm.recipient_type == "JUDGE":
+        recipient = db.query(Judge).filter(Judge.id == comm.recipient_id).first()
+    
+    if not recipient or not recipient.email:
+        raise HTTPException(status_code=400, detail="Recipient has no email address")
+    
+    # ACTUALLY SEND THE EMAIL (or mock if no API key)
+    email_sent = actually_send_email(recipient.email, comm.subject, comm.body)
+    
+    # Update status
+    comm.status = "SENT" if email_sent else "FAILED"
     comm.sent_at = datetime.utcnow()
     db.commit()
     
-    return {"message": f"Email marked as sent to recipient {comm.recipient_id}"}
+    if email_sent:
+        return {
+            "message": f"Email sent to {recipient.email}",
+            "sent": True,
+            "mock_mode": not bool(SENDGRID_API_KEY)
+        }
+    else:
+        raise HTTPException(status_code=500, detail="Email delivery failed")
+
 
 
 # ─────────────────────────────────────────────
@@ -481,17 +860,57 @@ def approve_communication(comm_id: int, db: Session = Depends(get_db)):
 @app.post("/api/events/{event_id}/judges")
 def add_judge(event_id: int, request: AddJudgeRequest, db: Session = Depends(get_db)):
     """
-    Adds a judge to the event.
-    
-    FRONTEND: Called from judge management section of dashboard
-    LLM USED: No
-    DB: Writes to judges table
+    Adds a judge AND auto-creates a user account.
     """
+    from email_drafting import draft_welcome_credentials_email
+    
+    # Create judge
     judge = Judge(event_id=event_id, name=request.name, email=request.email)
     db.add(judge)
+    db.flush()
+    
+    # AUTO-CREATE USER ACCOUNT
+    try:
+        random_password = generate_random_password(8)
+        user, plain_password = create_user(
+            db,
+            email=request.email,
+            password=random_password,
+            role="JUDGE",
+            reference_id=judge.id
+        )
+        
+        # Draft welcome email with credentials
+        email_content = draft_welcome_credentials_email(
+            participant_name=request.name,  # Reusing the function
+            email=request.email,
+            password=random_password
+        )
+        
+        # Save email
+        comm = Communication(
+            event_id=event_id,
+            recipient_id=judge.id,
+            recipient_type="JUDGE",
+            type="JUDGE_CREDENTIALS",
+            subject=email_content["subject"],
+            body=email_content["body"],
+            status="DRAFT"
+        )
+        db.add(comm)
+        
+    except Exception as e:
+        print(f"User creation skipped for {request.email}: {e}")
+    
     db.commit()
     db.refresh(judge)
-    return {"judge_id": judge.id, "message": f"Judge {judge.name} added"}
+    
+    return {
+        "judge_id": judge.id, 
+        "message": f"Judge {judge.name} added. Credentials email drafted."
+    }
+
+
 
 
 @app.get("/api/events/{event_id}/judges")
@@ -627,19 +1046,33 @@ def start_evaluation(event_id: int, request: StartEvaluationRequest, db: Session
 @app.post("/api/scores/submit")
 def submit_score(request: SubmitScoreRequest, db: Session = Depends(get_db)):
     """
-    Judge submits a score for a team.
-    After submission, checks if all judges have scored this team.
-    If yes, runs anomaly detection automatically.
-    
-    FRONTEND: Called from judge portal when they submit their evaluation form
-    LLM USED: YES — if anomaly detected, explain_anomaly() is called
-    DB: Writes to scores table, possibly writes to anomalies table
-    
-    APPROVAL GATE: If anomaly detected, results are held until committee resolves it
+    Submit or UPDATE a judge's score for a team.
+    If judge already scored this team, update the score instead of creating duplicate.
     """
-    # Save the score
+    # Check if score already exists
+    existing_score = db.query(Score).filter(
+        Score.judge_id == request.judge_id,
+        Score.team_id == request.team_id
+    ).first()
+    
+    if existing_score:
+        # Update existing score
+        existing_score.score = request.score
+        existing_score.submitted_at = datetime.utcnow()
+        db.commit()
+        return {
+            "score_saved": True,
+            "updated": True,
+            "message": "Score updated successfully"
+        }
+    
+    # Create new score
+    judge = db.query(Judge).filter(Judge.id == request.judge_id).first()
+    if not judge:
+        raise HTTPException(status_code=404, detail="Judge not found")
+    
     score = Score(
-        event_id=db.query(Judge).filter(Judge.id == request.judge_id).first().event_id,
+        event_id=judge.event_id,
         team_id=request.team_id,
         judge_id=request.judge_id,
         score=request.score
@@ -716,16 +1149,54 @@ def list_anomalies(event_id: int, db: Session = Depends(get_db)):
 @app.post("/api/anomalies/{anomaly_id}/resolve")
 def resolve_anomaly(anomaly_id: int, request: ResolveAnomalyRequest, db: Session = Depends(get_db)):
     """
-    Committee resolves a flagged anomaly.
-    
-    FRONTEND: Called when committee clicks "Resolve" on anomaly alert
-    LLM USED: No
-    DB: Updates anomaly.status, releases result hold
+    Resolve a flagged anomaly.
+    If action is 'request_reevaluation', send email to the judge whose score was flagged.
     """
+    from email_drafting import draft_anomaly_reevaluation_email
+    from datetime import datetime
+    
     anomaly = db.query(Anomaly).filter(Anomaly.id == anomaly_id).first()
     if not anomaly:
         raise HTTPException(status_code=404, detail="Anomaly not found")
     
+    # ✅ NEW: If requesting re-evaluation, send email to the judge
+    if request.action == "request_reevaluation":
+        # Find the score that was flagged
+        scores = db.query(Score).filter(Score.team_id == anomaly.team_id).all()
+        
+        # Calculate average and find outlier
+        if scores:
+            avg = sum(s.score for s in scores) / len(scores)
+            for s in scores:
+                deviation = abs(s.score - avg)
+                if deviation > 20:  # threshold
+                    # Found the outlier judge
+                    judge = db.query(Judge).filter(Judge.id == s.judge_id).first()
+                    if judge:
+                        # Draft re-evaluation email
+                        email = draft_anomaly_reevaluation_email(
+                            judge_name=judge.name,
+                            team_name=anomaly.team_name or f"Team #{anomaly.team_id}",
+                            anomaly_explanation=anomaly.explanation
+                        )
+                        
+                        # Save to communications
+                        comm = Communication(
+                            event_id=anomaly.event_id,
+                            recipient_id=judge.id,
+                            recipient_type="JUDGE",
+                            type="ANOMALY_RESOLUTION",
+                            subject=email["subject"],
+                            body=email["body"],
+                            status="DRAFT"
+                        )
+                        db.add(comm)
+                        db.commit()
+                        
+                        # Optionally mark the score for re-submission
+                        # (you could add a "needs_reevaluation" field to Score model)
+    
+    # Mark anomaly as resolved
     anomaly.status = "RESOLVED"
     anomaly.results_held = False
     db.commit()
@@ -1174,3 +1645,4 @@ def debug_evaluations(event_id: int, db: Session = Depends(get_db)):
     }
     
     return result
+

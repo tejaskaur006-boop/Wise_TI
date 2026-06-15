@@ -2,6 +2,9 @@ from sqlalchemy import create_engine, Column, Integer, String, Float, Boolean, D
 from sqlalchemy.ext.declarative import declarative_base
 from sqlalchemy.orm import sessionmaker, relationship
 from datetime import datetime
+from werkzeug.security import generate_password_hash, check_password_hash
+import secrets
+import string
 
 # SQLite — creates a file called eventflow.db in your project folder
 # No installation needed, no server needed, just a file
@@ -156,6 +159,23 @@ class Approval(Base):
 
     created_at = Column(DateTime, default=datetime.utcnow)
 
+class User(Base):
+    """
+    Authentication table for all user types.
+    Stores email + hashed password + role.
+    """
+    __tablename__ = "users"
+    
+    id = Column(Integer, primary_key=True, index=True)
+    email = Column(String, unique=True, index=True)
+    password_hash = Column(String)  # Never store plain text!
+    role = Column(String)  # 'COMMITTEE', 'PARTICIPANT', 'JUDGE'
+    reference_id = Column(Integer, nullable=True)  # Points to Participant.id or Judge.id
+    is_active = Column(Boolean, default=True)
+    created_at = Column(DateTime, default=datetime.utcnow)
+    last_login = Column(DateTime, nullable=True)
+
+
 
 class EvaluationGuide(Base):
     """
@@ -286,3 +306,35 @@ def get_activity_log(db, event_id: int):
         "status": c.status,
         "created_at": str(c.created_at)
     } for c in comms]
+
+def generate_random_password(length=8):
+    """Generate a secure random password"""
+    import secrets
+    import string
+    alphabet = string.ascii_letters + string.digits
+    return ''.join(secrets.choice(alphabet) for _ in range(length))
+
+def create_user(db, email: str, password: str, role: str, reference_id: int = None):
+    """Create a new user with hashed password"""
+    user = User(
+        email=email.lower().strip(),
+        password_hash=generate_password_hash(password),
+        role=role,
+        reference_id=reference_id
+    )
+    db.add(user)
+    db.commit()
+    db.refresh(user)
+    return user, password  # Return plain password for emailing
+
+def get_user_by_email(db, email: str):
+    return db.query(User).filter(User.email == email.lower().strip()).first()
+
+def verify_user(db, email: str, password: str):
+    """Verify credentials and return user if valid"""
+    user = get_user_by_email(db, email)
+    if user and check_password_hash(user.password_hash, password):
+        user.last_login = datetime.utcnow()
+        db.commit()
+        return user
+    return None

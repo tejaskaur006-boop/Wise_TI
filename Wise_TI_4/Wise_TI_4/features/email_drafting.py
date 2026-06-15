@@ -213,3 +213,103 @@ Return ONLY JSON: {{"subject": "...", "body": "..."}}"""
     
     response = call_llm(system, user, max_tokens=600)
     return safe_parse_json(response)
+
+# ════════════════════════════════════════════════════
+# EMAIL 5: Welcome with Credentials (NEW)
+# Sent when participant/judge is added to system
+# ════════════════════════════════════════════════════
+
+def draft_welcome_credentials_email(
+    participant_name: str,
+    email: str,
+    password: str
+) -> dict:
+    """
+    Drafts welcome email with login credentials.
+    """
+    system = """You are an event coordinator. Draft professional welcome emails.
+Return ONLY JSON: {"subject": "...", "body": "..."}"""
+    
+    user_message = f"""Draft a welcome email for a new hackathon participant:
+
+Name: {participant_name}
+Email: {email}
+Generated Password: {password}
+
+Include:
+- Warm welcome to the event
+- Their login credentials (email and password)
+- Instructions to log in to the portal
+- Reminder to change password after first login
+- Brief overview of what they can do in the portal
+
+Return ONLY JSON: {{"subject": "...", "body": "..."}}"""
+    
+    response = call_llm(system, user_message, max_tokens=500)
+    return safe_parse_json(response)
+
+
+# ════════════════════════════════════════════════════
+# EMAIL 6: Progression Invitation (NEW)
+# Sent when participant qualifies for next round
+# ════════════════════════════════════════════════════
+
+def draft_progression_invitation_email(
+    participant_name: str,
+    team_name: str,
+    rank: int,
+    next_round: str
+) -> dict:
+    """
+    Drafts congratulations email for qualified participants.
+    """
+    system = """You are an event coordinator. Draft congratulatory emails.
+Return ONLY JSON: {"subject": "...", "body": "..."}"""
+    
+    user_message = f"""Draft a congratulations email:
+
+Participant: {participant_name}
+Team: {team_name}
+Rank: #{rank}
+Qualified for: {next_round}
+
+Make it warm, congratulatory, and include a clear call-to-action to confirm participation.
+Return ONLY JSON: {{"subject": "...", "body": "..."}}"""
+    
+    response = call_llm(system, user_message, max_tokens=500)
+    return safe_parse_json(response)
+
+
+# ════════════════════════════════════════════════════
+# EMAIL 7: Anomaly Re-evaluation Request (NEW)
+# Sent when committee requests a judge to re-evaluate
+# ════════════════════════════════════════════════════
+
+def draft_anomaly_reevaluation_email(
+    judge_name: str,
+    team_name: str,
+    anomaly_explanation: str
+) -> dict:
+    """
+    Drafts email asking a judge to re-evaluate a team.
+    """
+    system = """You are an event coordinator. Draft professional re-evaluation requests.
+Return ONLY JSON: {"subject": "...", "body": "..."}"""
+    
+    user_message = f"""Draft a re-evaluation request email:
+
+Judge: {judge_name}
+Team: {team_name}
+Reason: {anomaly_explanation}
+
+Ask them to re-evaluate with neutral tone. Provide clear instructions.
+Return ONLY JSON: {{"subject": "...", "body": "..."}}"""
+    
+    response = call_llm(system, user_message, max_tokens=500)
+    return safe_parse_json(response)
+
+
+# ════════════════════════════════════════════════════
+# EMAIL 8: Deadline Reminder (Already exists - keeping for reference)
+# ════════════════════════════════════════════════════
+# draft_deadline_reminder_email already exists
