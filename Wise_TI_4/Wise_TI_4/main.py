@@ -1157,40 +1157,35 @@ def list_anomalies(event_id: int, db: Session = Depends(get_db)):
 def resolve_anomaly(anomaly_id: int, request: ResolveAnomalyRequest, db: Session = Depends(get_db)):
     """
     Resolve a flagged anomaly.
-    If action is 'request_reevaluation', send email to the judge whose score was flagged.
+    Auto-transitions event to RESULTS stage when all anomalies are resolved.
     """
     
-    from datetime import datetime
     
     anomaly = db.query(Anomaly).filter(Anomaly.id == anomaly_id).first()
     if not anomaly:
         raise HTTPException(status_code=404, detail="Anomaly not found")
     
-    # ✅ FIX: Look up team name from team_id
+    # Look up team name
     team = db.query(Team).filter(Team.id == anomaly.team_id).first()
     team_name = team.name if team else f"Team #{anomaly.team_id}"
     
-    # ✅ NEW: If requesting re-evaluation, send email to the judge whose score was flagged
+    # If requesting re-evaluation, send email to the judge whose score was flagged
     if request.action == "request_reevaluation":
-        # Find the score that was flagged
         scores = db.query(Score).filter(Score.team_id == anomaly.team_id).all()
         
         if scores:
             avg = sum(s.score for s in scores) / len(scores)
             for s in scores:
                 deviation = abs(s.score - avg)
-                if deviation > 20:  # threshold
-                    # Found the outlier judge
+                if deviation > 20:
                     judge = db.query(Judge).filter(Judge.id == s.judge_id).first()
                     if judge:
-                        # Draft re-evaluation email
                         email = draft_anomaly_reevaluation_email(
                             judge_name=judge.name,
-                            team_name=team_name,  # ✅ Now using the looked-up name
+                            team_name=team_name,
                             anomaly_explanation=anomaly.explanation
                         )
                         
-                        # Save to communications
                         comm = Communication(
                             event_id=anomaly.event_id,
                             recipient_id=judge.id,
@@ -1208,8 +1203,164 @@ def resolve_anomaly(anomaly_id: int, request: ResolveAnomalyRequest, db: Session
     anomaly.results_held = False
     db.commit()
     
-    return {"message": f"Anomaly resolved with action: {request.action}"}
+    # ✅ NEW: Check if all anomalies are now resolved → auto-transition to RESULTS
+    event = db.query(Event).filter(Event.id == anomaly.event_id).first()
+    if event:
+        remaining_anomalies = db.query(Anomaly).filter(
+            Anomaly.event_id == anomaly.event_id,
+            Anomaly.status == "PENDING_REVIEW"
+        ).count()
+        
+        # Also check if all approved teams have been scored
+        approved_teams = db.query(Team).filter(
+            Team.event_id == anomaly.event_id,
+            Team.status == "APPROVED"
+        ).all()
+        
+        teams_fully_scored = 0
+        for t in approved_teams:
+            scores = db.query(Score).filter(Score.team_id == t.id).all()
+            judges = db.query(Judge).filter(Judge.event_id == anomaly.event_id).all()
+            if len(scores) >= len(judges) and len(judges) > 0:
+                teams_fully_scored += 1
+        
+        # If all anomalies resolved AND all teams scored → move to RESULTS
+        if remaining_anomalies == 0 and len(approved_teams) > 0 and teams_fully_scored == len(approved_teams):
+            if event.current_stage != "RESULTS":
+                event.current_stage = "RESULTS"
+                db.commit()
+                print(f"✓ Event {event.id} auto-transitioned to RESULTS stage")
+                
+                # Auto-draft results emails for all participants
+                for team in approved_teams:
+                    team_scores = db.query(Score).filter(Score.team_id == team.id).all()
+                    if team_scores:
+                        avg = sum(s.score for s in team_scores) / len(team_scores)
+                        
+                        # Get rank
+                        all_team_avgs = []
+                        for t in approved_teams:
+                            t_scores = db.query(Score).filter(Score.team_id == t.id).all()
+                            if t_scores:
+                                t_avg = sum(s.score for s in t_scores) / len(t_scores)
+                                all_team_avgs.append({"team_id": t.id, "avg": t_avg, "name": t.name})
+                        
+                        all_team_avgs.sort(key=lambda x: x["avg"], reverse=True)
+                        rank = next((i+1 for i, t in enumerate(all_team_avgs) if t["team_id"] == team.id), 0)
+                        
+                        # Draft email for each team member
+                        members = db.query(Participant).filter(Participant.team_id == team.id).all()
+                        for member in members:
+                            try:
+                                
+                                email = draft_results_email(
+                                    participant_name=member.name,
+                                    team_name=team.name,
+                                    score=avg,
+                                    rank=rank,
+                                    qualified=(rank <= 3),
+                                    next_round_date="June 25, 2025",
+                                    confirmation_link=f"http://localhost:5173/confirm/{member.id}"
+                                )
+                                
+                                comm = Communication(
+                                    event_id=event.id,
+                                    recipient_id=member.id,
+                                    recipient_type="PARTICIPANT",
+                                    type="RESULTS",
+                                    subject=email["subject"],
+                                    body=email["body"],
+                                    status="DRAFT"
+                                )
+                                db.add(comm)
+                            except Exception as e:
+                                print(f"Error drafting results email for {member.name}: {e}")
+                
+                db.commit()
+    
+    return {
+        "message": f"Anomaly resolved with action: {request.action}",
+        "auto_transitioned": event.current_stage == "RESULTS" if event else False
+    }
 
+@app.post("/api/events/{event_id}/publish-results")
+def publish_results(event_id: int, db: Session = Depends(get_db)):
+    """
+    Manually publish results (bypasses auto-transition).
+    Drafts results emails for all participants.
+    """
+    
+    
+    event = db.query(Event).filter(Event.id == event_id).first()
+    if not event:
+        raise HTTPException(status_code=404, detail="Event not found")
+    
+    approved_teams = db.query(Team).filter(
+        Team.event_id == event_id,
+        Team.status == "APPROVED"
+    ).all()
+    
+    if not approved_teams:
+        raise HTTPException(status_code=400, detail="No approved teams to publish results for")
+    
+    # Calculate rankings
+    team_rankings = []
+    for team in approved_teams:
+        scores = db.query(Score).filter(Score.team_id == team.id).all()
+        if scores:
+            avg = sum(s.score for s in scores) / len(scores)
+            team_rankings.append({"team": team, "avg": avg})
+    
+    team_rankings.sort(key=lambda x: x["avg"], reverse=True)
+    
+    # Draft results emails
+    emails_created = 0
+    for idx, item in enumerate(team_rankings):
+        rank = idx + 1
+        team = item["team"]
+        avg_score = item["avg"]
+        
+        members = db.query(Participant).filter(Participant.team_id == team.id).all()
+        for member in members:
+            try:
+                email = draft_results_email(
+                    participant_name=member.name,
+                    team_name=team.name,
+                    score=avg_score,
+                    rank=rank,
+                    qualified=(rank <= 3),
+                    next_round_date="June 25, 2025",
+                    confirmation_link=f"http://localhost:5173/confirm/{member.id}"
+                )
+                
+                comm = Communication(
+                    event_id=event_id,
+                    recipient_id=member.id,
+                    recipient_type="PARTICIPANT",
+                    type="RESULTS",
+                    subject=email["subject"],
+                    body=email["body"],
+                    status="DRAFT"
+                )
+                db.add(comm)
+                emails_created += 1
+            except Exception as e:
+                print(f"Error: {e}")
+    
+    db.commit()
+    
+    # Update event stage
+    event.current_stage = "RESULTS"
+    db.commit()
+    
+    return {
+        "message": f"Results published! {emails_created} emails drafted.",
+        "emails_created": emails_created,
+        "leaderboard": [
+            {"rank": i+1, "team_name": item["team"].name, "score": round(item["avg"], 2)}
+            for i, item in enumerate(team_rankings)
+        ]
+    }
 
 
 # ─────────────────────────────────────────────
@@ -1341,28 +1492,31 @@ def get_participant_status(participant_id: int, db: Session = Depends(get_db)):
 # SECTION 9: RAG — COMMITTEE Q&A
 # ─────────────────────────────────────────────
 
+class AskQuestionRequest(BaseModel):
+    question: str
+    user_id: Optional[int] = None
+    user_role: Optional[str] = None
+    user_email: Optional[str] = None
+    reference_id: Optional[int] = None
+
 @app.post("/api/events/{event_id}/ask")
 def ask_question(event_id: int, request: AskQuestionRequest, db: Session = Depends(get_db)):
-    """
-    Committee asks a natural language question about the event.
-    RAG pipeline: retrieves relevant DB data → injects into prompt → LLM answers.
+    # Build user context for role-aware filtering
+    user_context = {
+        'user_id': request.user_id,
+        'user_role': request.user_role,
+        'user_email': request.user_email,
+        'reference_id': request.reference_id,
+    }
     
-    FRONTEND: Called from the chat/Q&A box on the committee dashboard
-    LLM USED: YES — answer_question() from rag.py
-    DB: Reads from all tables (via rag.py)
-    
-    Example questions:
-    - "Which teams haven't been evaluated yet?"
-    - "Are there any pending anomalies?"
-    - "What is the current leaderboard?"
-    - "Which participants are in Team Orion?"
-    """
     answer = answer_question(
         question=request.question,
         db=db,
-        event_id=event_id
+        event_id=event_id,
+        user_context=user_context
     )
     return {"question": request.question, "answer": answer}
+
 
 
 # ─────────────────────────────────────────────

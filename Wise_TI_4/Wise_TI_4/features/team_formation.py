@@ -112,9 +112,16 @@ Members:
 {members_text}
 Rules: {rules_text}
 
-Write a 3-4 sentence rationale for this team composition."""
+Write a COMPLETE 3-4 sentence rationale (minimum 100 words) explaining why this specific team composition makes sense. 
+
+CRITICAL INSTRUCTIONS:
+- Do NOT stop mid-sentence under any circumstances
+- Complete EVERY sentence you start
+- Must include: (1) what skills each member brings, (2) how they complement each other, (3) why the institutional diversity is valuable
+- End with a proper concluding sentence with a period
+- Aim for 3-4 complete, well-formed sentences"""
         
-        rationale = call_llm(system, user, max_tokens=250)
+        rationale = call_llm(system, user, max_tokens=400)
         
         print(f"   ✅ LLM returned ({len(rationale)} chars): {rationale[:100]}...")
         
