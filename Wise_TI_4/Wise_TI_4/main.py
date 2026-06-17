@@ -26,6 +26,8 @@ from features.email_drafting import (
     draft_anomaly_reevaluation_email      # ← Add this
 )
 
+
+
 # Committee code from environment variable (with fallback)
 COMMITTEE_CODE = os.getenv("COMMITTEE_CODE", "TI2025HACK")
 
@@ -93,6 +95,8 @@ from features.email_drafting  import (
     draft_deadline_reminder_email,
     draft_results_email
 )
+from llm_service import USE_CLOUD, OLLAMA_API_KEY
+
 from features.evaluation import generate_evaluation_guide, detect_and_explain_anomaly
 from features.rag        import answer_question
 
@@ -1808,3 +1812,16 @@ def debug_evaluations(event_id: int, db: Session = Depends(get_db)):
     
     return result
 
+# ─────────────────────────────────────────────
+# DEBUG: LLM STATUS CHECK
+# ─────────────────────────────────────────────
+
+@app.get("/api/llm-status")
+def llm_status():
+    """Check which LLM backend is currently active (cloud or local)."""
+    return {
+        "use_cloud": USE_CLOUD,
+        "api_key_loaded": bool(OLLAMA_API_KEY),
+        "model": "gpt-oss:20b (cloud)" if USE_CLOUD else "qwen3:0.6b (local)",
+        "key_preview": OLLAMA_API_KEY[:8] + "..." if OLLAMA_API_KEY else None
+    }

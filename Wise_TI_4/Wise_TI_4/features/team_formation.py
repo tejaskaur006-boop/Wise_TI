@@ -75,7 +75,6 @@ def form_teams(participants: list, team_size: int, no_same_institution: bool) ->
 # ─────────────────────────────────────────────
 # PART 2: LLM RATIONALE GENERATION (WITH FALLBACK)
 # ─────────────────────────────────────────────
-
 def generate_team_rationale(team_name: str, members: list, rules: dict) -> str:
     """
     Takes a formed team and asks the LLM to explain why this grouping makes sense.
@@ -106,29 +105,59 @@ def generate_team_rationale(team_name: str, members: list, rules: dict) -> str:
     print(f"   Institutions: {institutions_set}")
     
     try:
-        system = "You are a hackathon coordinator. Write a clear team rationale in 3-4 sentences. Return ONLY plain text, no JSON, no markdown."
-        user = f"""Team: {team_name}
-Members:
-{members_text}
-Rules: {rules_text}
-
-Write a COMPLETE 3-4 sentence rationale (minimum 100 words) explaining why this specific team composition makes sense. 
-
-CRITICAL INSTRUCTIONS:
-- Do NOT stop mid-sentence under any circumstances
-- Complete EVERY sentence you start
-- Must include: (1) what skills each member brings, (2) how they complement each other, (3) why the institutional diversity is valuable
-- End with a proper concluding sentence with a period
-- Aim for 3-4 complete, well-formed sentences"""
+        # COMPLETELY REWRITTEN PROMPT - forces complete responses
+        system = """You are an expert hackathon coordinator who writes detailed team analyses. 
+You ALWAYS complete every sentence. You NEVER stop mid-thought. 
+You cover ALL team members in your analysis."""
         
-        rationale = call_llm(system, user, max_tokens=400)
+        user = f"""Write a COMPREHENSIVE team rationale for {team_name}.
+
+Team Members:
+{members_text}
+Formation Rules: {rules_text}
+
+REQUIREMENTS - READ CAREFULLY:
+1. Write EXACTLY 5 complete sentences (not 3, not 4 - exactly 5)
+2. Each sentence must be 30-50 words long
+3. Sentence 1: Introduce the team and its overall strength
+4. Sentence 2: Describe the FIRST member and their specific skills
+5. Sentence 3: Describe the SECOND member and how they complement the first
+6. Sentence 4: Describe the THIRD member and the complete skill coverage
+7. Sentence 5: Conclude with why institutional diversity matters for this team
+8. Total response MUST be 150-250 words
+9. End with a period. Do NOT stop early.
+10. Write ONLY the rationale, no preamble, no labels.
+
+Begin writing the 5 sentences now:"""
+        
+        # Increased max_tokens and added retry logic
+        rationale = call_llm(system, user, max_tokens=2000)
         
         print(f"   ✅ LLM returned ({len(rationale)} chars): {rationale[:100]}...")
         
-        if rationale and len(rationale.strip()) > 20:
+        if rationale and len(rationale.strip()) > 50:
             return rationale.strip()
         else:
-            print(f"   ⚠️ LLM response too short, using fallback")
+            print(f"   ⚠️ LLM response too short, retrying with simpler prompt...")
+            
+            # RETRY with even simpler prompt
+            try:
+                simple_system = "You are an expert at writing team rationales. Always complete your sentences."
+                simple_user = f"""Write 5 complete sentences about why this team works well:
+
+{members_text}
+
+Cover all members, their skills, and why diverse institutions help. Write 5 full sentences. End with a period."""
+                
+                rationale = call_llm(simple_system, simple_user, max_tokens=1500)
+                
+                if rationale and len(rationale.strip()) > 50:
+                    print(f"   ✅ Retry succeeded ({len(rationale)} chars)")
+                    return rationale.strip()
+            except:
+                pass
+            
+            print(f"   ⚠️ LLM response still too short, using fallback")
     
     except Exception as e:
         print(f"   ❌ LLM call failed: {e}")
