@@ -127,19 +127,12 @@ Return JSON with exactly this structure:
 def find_config_gaps(config: dict) -> list:
     """
     Checks the parsed config for missing critical information.
-    Fixed version — handles Qwen3's tendency to repeat JSON.
+    Deterministic version — only checks exactly what the app needs.
     """
-    import re
-
-    # First do a simple Python check for truly critical fields
-    # This avoids an LLM call for obvious cases
     critical_missing = []
 
     if not config.get("team_size"):
         critical_missing.append("What is the team size (how many people per team)?")
-
-    if not config.get("stages"):
-        critical_missing.append("What are the stages or phases of your event?")
 
     eval_section = config.get("evaluation", {})
     if eval_section.get("judges_count") and not eval_section.get("criteria"):
@@ -148,54 +141,11 @@ def find_config_gaps(config: dict) -> list:
     if eval_section.get("judges_count", 0) > 1 and not eval_section.get("anomaly_threshold"):
         critical_missing.append("What score difference should trigger an anomaly flag?")
 
-    # If we already found critical missing fields, return them
-    # No need to call LLM
-    if critical_missing:
-        return critical_missing
+    # If we found critical missing fields, return them.
+    # Otherwise, return empty list (READY). 
+    # Bypassing the LLM validator completely so it doesn't ask for dates/locations.
+    return critical_missing
 
-    # Everything critical is present — ask LLM only for non-obvious gaps
-    system = """You are an event configuration validator.
-Look at this event config and decide if it has enough information to run.
-YOU MUST respond with ONLY one of these two options:
-Option A: The single word COMPLETE (if enough info exists)
-Option B: A numbered list of questions (if critical info is missing)
-DO NOT repeat the JSON. DO NOT add explanation. ONLY respond with COMPLETE or questions."""
-
-    user = f"""Event config to validate:
-team_size: {config.get('team_size')}
-stages count: {len(config.get('stages', []))}
-judges: {config.get('evaluation', {}).get('judges_count')}
-criteria: {config.get('evaluation', {}).get('criteria')}
-anomaly_threshold: {config.get('evaluation', {}).get('anomaly_threshold')}
-top_n: {config.get('progression', {}).get('top_n')}
-
-Is there enough information to run this event?
-If yes: respond COMPLETE
-If no: list only the missing critical fields as questions"""
-
-    response = call_llm(system, user, max_tokens=200)
-
-    # Remove <think> tags
-    response = re.sub(r'<think>.*?</think>', '', response, flags=re.DOTALL).strip()
-
-    # If response contains JSON characters it repeated the config — treat as COMPLETE
-    if '{' in response or '"event_name"' in response:
-        return []
-
-    if "COMPLETE" in response.upper():
-        return []
-
-    # Parse numbered questions
-    lines = response.strip().split("\n")
-    questions = []
-    for line in lines:
-        line = line.strip()
-        if line and "COMPLETE" not in line.upper() and '{' not in line:
-            cleaned = re.sub(r'^[\d]+[.)]\s*', '', line).strip()
-            if cleaned and len(cleaned) > 10:  # ignore very short lines
-                questions.append(cleaned)
-
-    return questions
 
 
 # ─────────────────────────────────────────────
@@ -204,51 +154,19 @@ If no: list only the missing critical fields as questions"""
 
 def check_contradictions(config: dict) -> list:
     """
-    Checks the parsed config for contradictions or logical problems.
-    Returns list of contradictions found, or empty list if none.
-    
-    Example contradiction:
-    "teams of 3" but "need ML expert, frontend, backend, DevOps" = 4 roles for 3 people
-    
-    CALLED BY: main.py in POST /api/events/configure
-    CALLS: call_llm() from llm_service.py
+    Checks the parsed config for contradictions.
+    Deterministic version — uses Python for math, bypasses LLM hallucinations.
     """
-    
-    system = """You are an event configuration reviewer.
-Check for logical contradictions or impossible requirements.
-If no contradictions: respond with exactly: NO_CONTRADICTIONS
-If contradictions found: list them numbered, nothing else."""
-
-    user = f"""Check this event configuration for contradictions:
-
-{json.dumps(config, indent=2)}
-
-Common contradictions to check:
-- Scoring weights that don't add up to 100%
-- Team size too small for the number of required skill roles
-- Stages that reference things not defined elsewhere
-- Progression top_n larger than expected number of teams
-
-If no contradictions: NO_CONTRADICTIONS
-If contradictions found: numbered list only."""
-
-    response = call_llm(system, user, max_tokens=300)
-    
-    # Remove <think> tags
-    response = re.sub(r'<think>.*?</think>', '', response, flags=re.DOTALL).strip()
-    
-    if "NO_CONTRADICTIONS" in response.upper():
-        return []
-    
-    lines = response.strip().split("\n")
     contradictions = []
-    for line in lines:
-        line = line.strip()
-        if line and "NO_CONTRADICTIONS" not in line.upper():
-            cleaned = re.sub(r'^[\d]+[.)]\s*', '', line).strip()
-            if cleaned:
-                contradictions.append(cleaned)
+    eval_section = config.get("evaluation", {})
+    criteria = eval_section.get("criteria", [])
     
+    if criteria:
+        total_weight = sum(c.get("weight", 0) for c in criteria)
+        # Use a small tolerance for float issues (e.g., 99.9 or 100.1)
+        if abs(total_weight - 100) > 0.01:
+            contradictions.append(f"Scoring weights add up to {total_weight}%, but they must equal 100%.")
+            
     return contradictions
 
 

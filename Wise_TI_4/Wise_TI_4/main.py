@@ -25,6 +25,8 @@ from features.email_drafting import (
     draft_progression_invitation_email,   # ← Add this
     draft_anomaly_reevaluation_email      # ← Add this
 )
+from dotenv import load_dotenv
+load_dotenv()
 
 
 
