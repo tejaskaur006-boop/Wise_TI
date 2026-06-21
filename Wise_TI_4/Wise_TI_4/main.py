@@ -31,7 +31,7 @@ load_dotenv()
 
 
 # Committee code from environment variable (with fallback)
-COMMITTEE_CODE = os.getenv("COMMITTEE_CODE", "TI2025HACK")
+COMMITTEE_CODE = os.getenv("COMMITTEE_CODE", "TI2026HACK")
 
 # ════════════════════════════════════════════════════
 # EMAIL SENDING (with SendGrid + Mock Mode)
