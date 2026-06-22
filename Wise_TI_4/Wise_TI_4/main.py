@@ -369,6 +369,10 @@ async def upload_participants(event_id: int, file: UploadFile = File(...), db: S
     count = 0
     errors = []
     
+    # Fetch event name before the loop
+    event = db.query(Event).filter(Event.id == event_id).first()
+    event_name = event.name if event else "the hackathon"
+
     for idx, row in df.iterrows():
         try:
             # Validate email format
@@ -412,7 +416,7 @@ async def upload_participants(event_id: int, file: UploadFile = File(...), db: S
                 
                 # Draft welcome email
                 email_content = draft_welcome_credentials_email(
-                    participant_name=name, email=email, password=random_password
+                    participant_name=name, email=email, password=random_password, event_name=event_name
                 )
                 
                 comm = Communication(
@@ -882,6 +886,10 @@ def add_judge(event_id: int, request: AddJudgeRequest, db: Session = Depends(get
     db.add(judge)
     db.flush()
     
+     # Fetch event name
+    event = db.query(Event).filter(Event.id == event_id).first()
+    event_name = event.name if event else "the hackathon"
+
     # AUTO-CREATE USER ACCOUNT
     try:
         random_password = generate_random_password(8)
@@ -897,7 +905,8 @@ def add_judge(event_id: int, request: AddJudgeRequest, db: Session = Depends(get
         email_content = draft_welcome_credentials_email(
             participant_name=request.name,  # Reusing the function
             email=request.email,
-            password=random_password
+            password=random_password,
+            event_name=event_name
         )
         
         # Save email

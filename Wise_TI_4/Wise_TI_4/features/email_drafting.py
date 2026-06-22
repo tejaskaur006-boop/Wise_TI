@@ -222,28 +222,29 @@ Return ONLY JSON: {{"subject": "...", "body": "..."}}"""
 def draft_welcome_credentials_email(
     participant_name: str,
     email: str,
-    password: str
+    password: str,
+    event_name: str = "the hackathon" # Added event_name
 ) -> dict:
-    """
-    Drafts welcome email with login credentials.
-    """
+    """..."""
     system = """You are an event coordinator. Draft professional welcome emails.
 Return ONLY JSON: {"subject": "...", "body": "..."}"""
     
     user_message = f"""Draft a welcome email for a new hackathon participant:
 
-Name: {participant_name}
+Event Name: {event_name}
+Participant Name: {participant_name}
 Email: {email}
 Generated Password: {password}
 
 Include:
-- Warm welcome to the event
+- Warm welcome to {event_name} (DO NOT use placeholders like [Hackathon Name], use the actual event name provided)
 - Their login credentials (email and password)
 - Instructions to log in to the portal
 - Reminder to change password after first login
 - Brief overview of what they can do in the portal
 
 Return ONLY JSON: {{"subject": "...", "body": "..."}}"""
+
     
     response = call_llm(system, user_message, max_tokens=500)
     return safe_parse_json(response)
